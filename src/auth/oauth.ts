@@ -28,11 +28,11 @@ export async function performOAuthLogin(): Promise<void> {
       const body = (await response.json().catch(() => ({}))) as { message?: string };
       throw new Error(body.message ?? `API returned ${response.status}`);
     }
-    const body = (await response.json()) as { url?: string; message?: string };
-    if (!body.url) {
+    const body = (await response.json()) as { login_url?: string; message?: string };
+    if (!body.login_url) {
       throw new Error(body.message ?? "No login URL returned by the API");
     }
-    browserUrl = body.url;
+    browserUrl = body.login_url;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     error(`Failed to get login URL: ${msg}`);
