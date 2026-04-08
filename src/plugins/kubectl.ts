@@ -1,51 +1,41 @@
 import type { Plugin } from "./base.ts";
-import { ensureAuthenticated } from "../auth/manager.ts";
+import { ensureAuthenticated, forceReauthenticate } from "../auth/manager.ts";
 import { getApiUrl } from "../config/store.ts";
-import { createClient } from "../api/client.ts";
+import { createClient, AuthExpiredError } from "../api/client.ts";
+import { getCachedCredentials, cacheCredentials, clearCachedCredentials } from "../auth/sessions.ts";
 import type { Connection, HttpProxyCredentials } from "../api/types.ts";
-import { spinner, success, error, info, warn, dim } from "../ui/output.ts";
+import { spinner, error, info, warn, dim } from "../ui/output.ts";
 import { spawn } from "child_process";
 
 function getCurrentContext(args: string[]): string | null {
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--context" && i + 1 < args.length) {
-      return args[i + 1];
-    }
-    if (args[i].startsWith("--context=")) {
-      return args[i].split("=")[1];
-    }
+    if (args[i] === "--context" && i + 1 < args.length) return args[i + 1];
+    if (args[i].startsWith("--context=")) return args[i].split("=")[1];
   }
 
-  // Read current-context from kubectl
   const result = Bun.spawnSync(["kubectl", "config", "current-context"], {
     env: process.env as Record<string, string>,
   });
 
-  if (result.exitCode === 0) {
-    return result.stdout.toString().trim() || null;
-  }
-
-  return null;
+  return result.exitCode === 0 ? result.stdout.toString().trim() || null : null;
 }
 
 function findK8sConnection(connections: Connection[], contextName: string): Connection | null {
-  const exactMatch = connections.find((c) => c.name === contextName);
-  if (exactMatch) return exactMatch;
+  const exact = connections.find((c) => c.name === contextName);
+  if (exact) return exact;
 
-  const clusterMatch = connections.find(
-    (c) => c.access_schema?.cluster_name === contextName
-  );
-  if (clusterMatch) return clusterMatch;
+  const byCluster = connections.find((c) => c.access_schema?.cluster_name === contextName);
+  if (byCluster) return byCluster;
 
-  const tagMatch = connections.find(
+  const byTag = connections.find(
     (c) => c.tags?.context === contextName || c.tags?.cluster === contextName
   );
-  if (tagMatch) return tagMatch;
+  if (byTag) return byTag;
 
-  const partialMatch = connections.find(
+  const partial = connections.find(
     (c) => c.name.includes(contextName) || contextName.includes(c.name)
   );
-  if (partialMatch) return partialMatch;
+  if (partial) return partial;
 
   return null;
 }
@@ -53,26 +43,62 @@ function findK8sConnection(connections: Connection[], contextName: string): Conn
 function injectKubeconfig(proxyUrl: string, token: string, contextName: string): void {
   Bun.spawnSync(
     ["kubectl", "config", "set-cluster", `hsh-${contextName}`,
-      `--server=${proxyUrl}`,
-      "--insecure-skip-tls-verify=true"],
+      `--server=${proxyUrl}`, "--insecure-skip-tls-verify=true"],
     { env: process.env as Record<string, string> }
   );
-
   Bun.spawnSync(
     ["kubectl", "config", "set-credentials", `hsh-${contextName}`, `--token=${token}`],
     { env: process.env as Record<string, string> }
   );
-
   Bun.spawnSync(
     ["kubectl", "config", "set-context", contextName,
-      `--cluster=hsh-${contextName}`,
-      `--user=hsh-${contextName}`],
+      `--cluster=hsh-${contextName}`, `--user=hsh-${contextName}`],
     { env: process.env as Record<string, string> }
   );
 }
 
 function isLocalAddress(host: string): boolean {
   return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
+}
+
+function execKubectl(args: string[]): Promise<void> {
+  return new Promise((resolve) => {
+    const child = spawn("kubectl", args, { stdio: "inherit" });
+    child.on("exit", (code) => process.exit(code ?? 0));
+    child.on("error", (err) => {
+      error(`Failed to start kubectl: ${err.message}`);
+      process.exit(1);
+    });
+  });
+}
+
+async function getK8sCredentials(
+  connectionName: string,
+  apiUrl: string,
+  retried = false,
+): Promise<{ resp: { has_review: boolean; review_id?: string; connection_credentials?: unknown }; creds: HttpProxyCredentials }> {
+  const cached = getCachedCredentials(connectionName);
+  if (cached?.connection_credentials) {
+    return { resp: cached, creds: cached.connection_credentials as HttpProxyCredentials };
+  }
+
+  const token = await ensureAuthenticated();
+  const client = createClient(apiUrl, token);
+
+  try {
+    const resp = await client.createCredentials(connectionName);
+    if (resp.connection_credentials) {
+      cacheCredentials(connectionName, resp);
+    }
+    return { resp, creds: resp.connection_credentials as HttpProxyCredentials };
+  } catch (err) {
+    if (err instanceof AuthExpiredError && !retried) {
+      clearCachedCredentials(connectionName);
+      await forceReauthenticate();
+      return getK8sCredentials(connectionName, apiUrl, true);
+    }
+    throw err;
+  }
 }
 
 export const kubectlPlugin: Plugin = {
@@ -87,22 +113,31 @@ export const kubectlPlugin: Plugin = {
       return execKubectl(args);
     }
 
-    // Ensure authenticated
-    const token = await ensureAuthenticated();
-    const apiUrl = getApiUrl()!;
+    const apiUrl = getApiUrl();
+    if (!apiUrl) return execKubectl(args);
 
-    // Find the k8s connection
+    let token = await ensureAuthenticated();
+    let client = createClient(apiUrl, token);
+
     const spin = spinner(`Looking up Kubernetes connection for context: ${contextName}...`);
-    const client = createClient(apiUrl, token);
 
     let connections: Connection[];
     try {
       connections = await client.listConnections();
-    } catch (err: unknown) {
-      spin.fail("Failed to fetch connections");
-      const msg = err && typeof err === "object" && "message" in err ? (err as { message: string }).message : String(err);
-      error(msg);
-      process.exit(1);
+    } catch (err) {
+      if (err instanceof AuthExpiredError) {
+        token = await forceReauthenticate();
+        client = createClient(apiUrl, token);
+        try {
+          connections = await client.listConnections();
+        } catch {
+          spin.stop();
+          return execKubectl(args);
+        }
+      } else {
+        spin.stop();
+        return execKubectl(args);
+      }
     }
 
     const connection = findK8sConnection(connections, contextName);
@@ -112,24 +147,20 @@ export const kubectlPlugin: Plugin = {
       return execKubectl(args);
     }
 
-    spin.text = `Creating credentials for ${connection.name}...`;
+    spin.text = `Connecting to ${connection.name} via Hoop...`;
 
-    // Create credentials via POST /api/connections/{name}/credentials
     let creds: HttpProxyCredentials;
     try {
-      const resp = await client.createCredentials(connection.name);
+      const result = await getK8sCredentials(connection.name, apiUrl);
 
-      if (resp.has_review && !resp.connection_credentials) {
+      if (result.resp.has_review && !result.resp.connection_credentials) {
         spin.warn("This connection requires approval");
-        info(`Review ID: ${resp.review_id}`);
-        info("Waiting for approval in the Hoop web UI...");
+        info(`Review ID: ${result.resp.review_id}`);
         process.exit(0);
       }
 
-      creds = resp.connection_credentials as HttpProxyCredentials;
-      if (!creds?.hostname) {
-        throw new Error("No Kubernetes credentials returned");
-      }
+      creds = result.creds;
+      if (!creds?.hostname) throw new Error("No Kubernetes credentials returned");
     } catch (err: unknown) {
       spin.fail("Failed to create credentials");
       const msg = err && typeof err === "object" && "message" in err ? (err as { message: string }).message : String(err);
@@ -137,35 +168,19 @@ export const kubectlPlugin: Plugin = {
       process.exit(1);
     }
 
-    spin.text = "Configuring kubectl proxy...";
+    const cached = getCachedCredentials(connection.name);
+    if (cached) {
+      const mins = Math.round((new Date(cached.expire_at).getTime() - Date.now()) / 60_000);
+      spin.succeed(`Using active session for ${connection.name} (expires in ${mins}m)`);
+    } else {
+      spin.succeed(`Kubernetes access configured via Hoop (${connection.name})`);
+    }
 
-    // Resolve gateway host — API may return 0.0.0.0 (listen address)
-    const gatewayHost = isLocalAddress(creds.hostname)
-      ? new URL(apiUrl).hostname
-      : creds.hostname;
+    const gatewayHost = isLocalAddress(creds.hostname) ? new URL(apiUrl).hostname : creds.hostname;
     const scheme = isLocalAddress(creds.hostname) ? "http" : "https";
     const proxyUrl = `${scheme}://${gatewayHost}:${creds.port}`;
     injectKubeconfig(proxyUrl, creds.proxy_token, contextName);
 
-    spin.succeed(`Kubernetes access configured via Hoop (${connection.name})`);
-
     return execKubectl(args);
   },
 };
-
-function execKubectl(args: string[]): Promise<void> {
-  return new Promise((resolve) => {
-    const child = spawn("kubectl", args, {
-      stdio: "inherit",
-    });
-
-    child.on("exit", (code) => {
-      process.exit(code ?? 0);
-    });
-
-    child.on("error", (err) => {
-      error(`Failed to start kubectl: ${err.message}`);
-      process.exit(1);
-    });
-  });
-}

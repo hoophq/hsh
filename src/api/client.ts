@@ -1,5 +1,12 @@
 import type { Connection, CredentialsRequest, CredentialsResponse, ApiError } from "./types.ts";
 
+export class AuthExpiredError extends Error {
+  constructor() {
+    super("Authentication expired");
+    this.name = "AuthExpiredError";
+  }
+}
+
 export class HoopApiClient {
   private apiUrl: string;
   private token: string;
@@ -19,6 +26,10 @@ export class HoopApiClient {
         ...options.headers,
       },
     });
+
+    if (response.status === 401 || response.status === 403) {
+      throw new AuthExpiredError();
+    }
 
     if (!response.ok) {
       let message = `API error: ${response.status} ${response.statusText}`;
