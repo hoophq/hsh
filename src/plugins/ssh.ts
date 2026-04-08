@@ -1,79 +1,138 @@
 import type { Plugin } from "./base.ts";
 import { ensureAuthenticated } from "../auth/manager.ts";
 import { getApiUrl } from "../config/store.ts";
+import { isAuthenticated } from "../auth/store.ts";
 import { createClient } from "../api/client.ts";
 import type { Connection, SSHCredentials } from "../api/types.ts";
-import { spinner, tokenBox, error, info, warn, dim } from "../ui/output.ts";
+import { spinner, tokenBox, error, info, dim } from "../ui/output.ts";
 import { spawn } from "child_process";
 
-interface ParsedSshArgs {
-  hostname: string;
-  user?: string;
-  port?: string;
-  rest: string[];
-}
-
-function parseSshArgs(args: string[]): ParsedSshArgs | null {
-  let hostname: string | undefined;
-  let user: string | undefined;
-  let port: string | undefined;
-  const rest: string[] = [];
+/**
+ * Extracts the destination hostname from SSH args without consuming them.
+ * Returns null if no hostname found (e.g. `ssh -V`).
+ * Does NOT modify the args array — we pass all original args through.
+ */
+function extractHostname(args: string[]): string | null {
+  const flagsWithValues = new Set([
+    "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
+    "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
+  ]);
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
 
-    if (arg === "-p" && i + 1 < args.length) {
-      port = args[++i];
-    } else if (arg === "-l" && i + 1 < args.length) {
-      user = args[++i];
-    } else if (arg.startsWith("-")) {
-      const flagsWithValues = ["-o", "-i", "-F", "-J", "-L", "-R", "-D", "-W", "-b", "-c", "-E", "-e", "-m", "-S", "-w"];
-      if (flagsWithValues.includes(arg) && i + 1 < args.length) {
-        rest.push(arg, args[++i]);
-      } else {
-        rest.push(arg);
-      }
-    } else if (!hostname) {
-      if (arg.includes("@")) {
-        const parts = arg.split("@");
-        user = parts[0];
-        hostname = parts[1];
-      } else {
-        hostname = arg;
-      }
-    } else {
-      rest.push(arg);
+    if (arg === "--") {
+      // Everything after -- is the remote command
+      break;
     }
+
+    if (arg.startsWith("-")) {
+      // Skip flags that consume the next arg
+      if (flagsWithValues.has(arg)) {
+        i++;
+      }
+      continue;
+    }
+
+    // First positional arg is the destination
+    const hostname = arg.includes("@") ? arg.split("@").pop()! : arg;
+    return hostname;
   }
 
-  if (!hostname) return null;
-  return { hostname, user, port, rest };
+  return null;
 }
 
-function findConnectionByHostname(connections: Connection[], hostname: string): Connection | null {
+/**
+ * Rewrites SSH args: replaces the original destination with gateway credentials
+ * and injects gateway port. Preserves ALL other args (flags, port forwards,
+ * remote commands, etc.)
+ */
+function rewriteArgs(
+  originalArgs: string[],
+  creds: SSHCredentials,
+  gatewayHost: string,
+): string[] {
+  const flagsWithValues = new Set([
+    "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
+    "-L", "-l", "-m", "-O", "-o", "-Q", "-R", "-S", "-W", "-w",
+  ]);
+
+  const result: string[] = [];
+  let destinationReplaced = false;
+  let portReplaced = false;
+
+  for (let i = 0; i < originalArgs.length; i++) {
+    const arg = originalArgs[i];
+
+    if (arg === "--") {
+      // Pass through -- and everything after it (remote command)
+      result.push(...originalArgs.slice(i));
+      break;
+    }
+
+    if (arg === "-p" && i + 1 < originalArgs.length) {
+      // Replace original port with gateway port
+      result.push("-p", creds.port);
+      portReplaced = true;
+      i++;
+      continue;
+    }
+
+    if (arg === "-l" && i + 1 < originalArgs.length) {
+      // Drop -l user — we set user via user@host
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      result.push(arg);
+      if (flagsWithValues.has(arg) && i + 1 < originalArgs.length) {
+        result.push(originalArgs[++i]);
+      }
+      continue;
+    }
+
+    if (!destinationReplaced) {
+      // Replace the destination with gateway credentials
+      result.push(`${creds.username}@${gatewayHost}`);
+      destinationReplaced = true;
+      continue;
+    }
+
+    // Additional positional args (remote command without --)
+    result.push(arg);
+  }
+
+  // Inject -p if the original command didn't have it
+  if (!portReplaced) {
+    result.unshift("-p", creds.port);
+  }
+
+  return result;
+}
+
+function findConnection(connections: Connection[], hostname: string): Connection | null {
   // Exact match on connection name
-  const exactMatch = connections.find(
+  const exact = connections.find(
     (c) => c.name === hostname || c.name === hostname.split(".")[0]
   );
-  if (exactMatch) return exactMatch;
+  if (exact) return exact;
 
-  // Match on access_schema.ssh_host
-  const hostMatch = connections.find(
-    (c) => c.access_schema?.ssh_host === hostname
-  );
-  if (hostMatch) return hostMatch;
+  // Match on access_schema
+  const byHost = connections.find((c) => c.access_schema?.ssh_host === hostname);
+  if (byHost) return byHost;
 
   // Match on tags
-  const tagMatch = connections.find(
+  const byTag = connections.find(
     (c) => c.tags?.hostname === hostname || c.tags?.host === hostname
   );
-  if (tagMatch) return tagMatch;
+  if (byTag) return byTag;
 
-  // Partial match on connection name
-  const partialMatch = connections.find(
+  // Partial match
+  const partial = connections.find(
     (c) => c.name.includes(hostname) || hostname.includes(c.name)
   );
-  if (partialMatch) return partialMatch;
+  if (partial) return partial;
 
   return null;
 }
@@ -82,55 +141,53 @@ function isLocalAddress(host: string): boolean {
   return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
 }
 
+/** Pass through to native ssh — no Hoop involved */
+function passthrough(args: string[]): void {
+  const child = spawn("ssh", args, { stdio: "inherit" });
+  child.on("exit", (code) => process.exit(code ?? 0));
+  child.on("error", (err) => {
+    error(`Failed to start ssh: ${err.message}`);
+    process.exit(1);
+  });
+}
+
 export const sshPlugin: Plugin = {
   name: "ssh",
   description: "SSH connections via Hoop gateway",
   wrappedCommand: "ssh",
 
   async run(args: string[]): Promise<void> {
-    const parsed = parseSshArgs(args);
-    if (!parsed) {
-      error("Could not parse SSH destination from arguments.");
-      info("Usage: ssh [user@]hostname");
-      process.exit(1);
+    // 1. Extract hostname — if none (e.g. `ssh -V`), pass through
+    const hostname = extractHostname(args);
+    if (!hostname) {
+      return passthrough(args);
     }
 
-    const { hostname } = parsed;
+    // 2. If not authenticated or no API URL configured, pass through
+    const apiUrl = getApiUrl();
+    if (!apiUrl || !isAuthenticated()) {
+      return passthrough(args);
+    }
 
-    // 1. Ensure authenticated
+    // 3. Look up connection — if not found in Hoop, pass through to native ssh
     const token = await ensureAuthenticated();
-    const apiUrl = getApiUrl()!;
-
-    // 2. Find the connection
-    const spin = spinner(`Looking up connection for ${hostname}...`);
     const client = createClient(apiUrl, token);
 
     let connections: Connection[];
     try {
       connections = await client.listConnections();
-    } catch (err: unknown) {
-      spin.fail("Failed to fetch connections");
-      const msg = err && typeof err === "object" && "message" in err ? (err as { message: string }).message : String(err);
-      error(msg);
-      process.exit(1);
+    } catch {
+      // API unreachable — don't block the user, pass through
+      return passthrough(args);
     }
 
-    const connection = findConnectionByHostname(connections, hostname);
+    const connection = findConnection(connections, hostname);
     if (!connection) {
-      spin.fail(`No Hoop connection found for: ${hostname}`);
-      info("Available connections:");
-      for (const c of connections.slice(0, 10)) {
-        dim(`  ${c.name} (${c.type})`);
-      }
-      if (connections.length > 10) {
-        dim(`  ... and ${connections.length - 10} more`);
-      }
-      process.exit(1);
+      return passthrough(args);
     }
 
-    spin.text = `Creating credentials for ${connection.name}...`;
-
-    // 3. Create credentials via POST /api/connections/{name}/credentials
+    // 4. Create credentials
+    const spin = spinner(`Connecting to ${connection.name} via Hoop...`);
     let creds: SSHCredentials;
     try {
       const resp = await client.createCredentials(connection.name);
@@ -155,13 +212,12 @@ export const sshPlugin: Plugin = {
 
     spin.succeed(`Credentials created for ${connection.name}`);
 
-    // 4. Resolve gateway host — API may return 0.0.0.0 (listen address),
-    //    in that case use the hostname from the configured API URL
+    // 5. Resolve gateway host
     const gatewayHost = isLocalAddress(creds.hostname)
       ? new URL(apiUrl).hostname
       : creds.hostname;
 
-    // 5. Display credentials
+    // 6. Display token
     tokenBox({
       title: "Hoop SSH Access",
       connection: connection.name,
@@ -169,25 +225,16 @@ export const sshPlugin: Plugin = {
       instructions: "Use the password above when prompted",
     });
 
-    info(`Connecting: ssh ${creds.username}@${gatewayHost} -p ${creds.port}`);
+    // 7. Rewrite SSH args: replace destination + port, keep everything else
+    const sshArgs = rewriteArgs(args, creds, gatewayHost);
+
+    info(`Connecting: ssh ${sshArgs.join(" ")}`);
     console.log();
 
-    // 6. Execute SSH to the gateway
-    const sshArgs = [
-      `${creds.username}@${gatewayHost}`,
-      "-p", creds.port,
-    ];
-
-    const child = spawn("ssh", sshArgs, {
-      stdio: "inherit",
-    });
-
-    child.on("exit", (code) => {
-      process.exit(code ?? 0);
-    });
-
+    const child = spawn("ssh", sshArgs, { stdio: "inherit" });
+    child.on("exit", (code) => process.exit(code ?? 0));
     child.on("error", (err) => {
-      error(`Failed to start SSH: ${err.message}`);
+      error(`Failed to start ssh: ${err.message}`);
       process.exit(1);
     });
   },
