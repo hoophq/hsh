@@ -78,6 +78,10 @@ function findConnectionByHostname(connections: Connection[], hostname: string): 
   return null;
 }
 
+function isLocalAddress(host: string): boolean {
+  return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
+}
+
 export const sshPlugin: Plugin = {
   name: "ssh",
   description: "SSH connections via Hoop gateway",
@@ -151,8 +155,13 @@ export const sshPlugin: Plugin = {
 
     spin.succeed(`Credentials created for ${connection.name}`);
 
-    // 4. Display credentials
-    // The gateway returns: username = secret_key (the token), password = "hoop"
+    // 4. Resolve gateway host — API may return 0.0.0.0 (listen address),
+    //    in that case use the hostname from the configured API URL
+    const gatewayHost = isLocalAddress(creds.hostname)
+      ? new URL(apiUrl).hostname
+      : creds.hostname;
+
+    // 5. Display credentials
     tokenBox({
       title: "Hoop SSH Access",
       connection: connection.name,
@@ -160,12 +169,12 @@ export const sshPlugin: Plugin = {
       instructions: "Use the password above when prompted",
     });
 
-    info(`Connecting: ssh ${creds.username}@${creds.hostname} -p ${creds.port}`);
+    info(`Connecting: ssh ${creds.username}@${gatewayHost} -p ${creds.port}`);
     console.log();
 
-    // 5. Execute SSH to the gateway
+    // 6. Execute SSH to the gateway
     const sshArgs = [
-      `${creds.username}@${creds.hostname}`,
+      `${creds.username}@${gatewayHost}`,
       "-p", creds.port,
     ];
 

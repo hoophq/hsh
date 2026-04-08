@@ -71,6 +71,10 @@ function injectKubeconfig(proxyUrl: string, token: string, contextName: string):
   );
 }
 
+function isLocalAddress(host: string): boolean {
+  return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
+}
+
 export const kubectlPlugin: Plugin = {
   name: "kubectl",
   description: "Kubernetes access via Hoop gateway",
@@ -135,9 +139,12 @@ export const kubectlPlugin: Plugin = {
 
     spin.text = "Configuring kubectl proxy...";
 
-    // Build proxy URL and inject into kubeconfig
-    const scheme = creds.hostname.includes("localhost") || creds.hostname.includes("127.0.0.1") ? "http" : "https";
-    const proxyUrl = `${scheme}://${creds.hostname}:${creds.port}`;
+    // Resolve gateway host — API may return 0.0.0.0 (listen address)
+    const gatewayHost = isLocalAddress(creds.hostname)
+      ? new URL(apiUrl).hostname
+      : creds.hostname;
+    const scheme = isLocalAddress(creds.hostname) ? "http" : "https";
+    const proxyUrl = `${scheme}://${gatewayHost}:${creds.port}`;
     injectKubeconfig(proxyUrl, creds.proxy_token, contextName);
 
     spin.succeed(`Kubernetes access configured via Hoop (${connection.name})`);
