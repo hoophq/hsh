@@ -2,7 +2,7 @@ import type { Plugin } from "./base.ts";
 import { ensureAuthenticated } from "../auth/manager.ts";
 import { getApiUrl } from "../config/store.ts";
 import { createClient } from "../api/client.ts";
-import type { Connection } from "../api/types.ts";
+import type { Connection, SSHCredentials } from "../api/types.ts";
 import { spinner, tokenBox, error, info, warn, dim } from "../ui/output.ts";
 import { spawn } from "child_process";
 
@@ -27,7 +27,6 @@ function parseSshArgs(args: string[]): ParsedSshArgs | null {
     } else if (arg === "-l" && i + 1 < args.length) {
       user = args[++i];
     } else if (arg.startsWith("-")) {
-      // Skip flags with values
       const flagsWithValues = ["-o", "-i", "-F", "-J", "-L", "-R", "-D", "-W", "-b", "-c", "-E", "-e", "-m", "-S", "-w"];
       if (flagsWithValues.includes(arg) && i + 1 < args.length) {
         rest.push(arg, args[++i]);
@@ -35,7 +34,6 @@ function parseSshArgs(args: string[]): ParsedSshArgs | null {
         rest.push(arg);
       }
     } else if (!hostname) {
-      // First non-flag argument is the destination
       if (arg.includes("@")) {
         const parts = arg.split("@");
         user = parts[0];
@@ -44,7 +42,6 @@ function parseSshArgs(args: string[]): ParsedSshArgs | null {
         hostname = arg;
       }
     } else {
-      // Remaining args (remote command)
       rest.push(arg);
     }
   }
@@ -94,7 +91,7 @@ export const sshPlugin: Plugin = {
       process.exit(1);
     }
 
-    const { hostname, user } = parsed;
+    const { hostname } = parsed;
 
     // 1. Ensure authenticated
     const token = await ensureAuthenticated();
@@ -127,45 +124,50 @@ export const sshPlugin: Plugin = {
       process.exit(1);
     }
 
-    spin.text = `Creating session for ${connection.name}...`;
+    spin.text = `Creating credentials for ${connection.name}...`;
 
-    // 3. Create session → get access token
-    let sessionToken: string;
+    // 3. Create credentials via POST /api/connections/{name}/credentials
+    let creds: SSHCredentials;
     try {
-      const session = await client.createSession({
-        connection: connection.name,
-        type: "exec",
-      });
-      sessionToken = session.id;
+      const resp = await client.createCredentials(connection.name);
+
+      if (resp.has_review && !resp.connection_credentials) {
+        spin.warn("This connection requires approval");
+        info(`Review ID: ${resp.review_id}`);
+        info("Waiting for approval in the Hoop web UI...");
+        process.exit(0);
+      }
+
+      creds = resp.connection_credentials as SSHCredentials;
+      if (!creds?.hostname) {
+        throw new Error("No SSH credentials returned");
+      }
     } catch (err: unknown) {
-      spin.fail("Failed to create session");
+      spin.fail("Failed to create credentials");
       const msg = err && typeof err === "object" && "message" in err ? (err as { message: string }).message : String(err);
       error(msg);
       process.exit(1);
     }
 
-    spin.succeed(`Session created for ${connection.name}`);
+    spin.succeed(`Credentials created for ${connection.name}`);
 
-    // 4. Display token
+    // 4. Display credentials
+    // The gateway returns: username = secret_key (the token), password = "hoop"
     tokenBox({
       title: "Hoop SSH Access",
       connection: connection.name,
-      token: sessionToken,
-      instructions: "Copy this token and paste when prompted by the gateway",
+      token: creds.password,
+      instructions: "Use the password above when prompted",
     });
 
-    // 5. Determine gateway host from API URL
-    const gatewayHost = new URL(apiUrl).hostname;
-    const sshTarget = user ? `${user}@${gatewayHost}` : gatewayHost;
-
-    info(`Connecting to gateway: ${gatewayHost}`);
+    info(`Connecting: ssh ${creds.username}@${creds.hostname} -p ${creds.port}`);
     console.log();
 
-    // 6. Execute SSH to gateway
-    const sshArgs = [sshTarget];
-    if (parsed.port) {
-      sshArgs.push("-p", parsed.port);
-    }
+    // 5. Execute SSH to the gateway
+    const sshArgs = [
+      `${creds.username}@${creds.hostname}`,
+      "-p", creds.port,
+    ];
 
     const child = spawn("ssh", sshArgs, {
       stdio: "inherit",

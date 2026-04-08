@@ -1,4 +1,4 @@
-import type { Connection, Session, SessionCreateRequest, ApiError } from "./types.ts";
+import type { Connection, CredentialsRequest, CredentialsResponse, ApiError } from "./types.ts";
 
 export class HoopApiClient {
   private apiUrl: string;
@@ -45,15 +45,14 @@ export class HoopApiClient {
     return this.request<Connection>(`/api/connections/${encodeURIComponent(name)}`);
   }
 
-  async createSession(req: SessionCreateRequest): Promise<Session> {
-    return this.request<Session>("/api/sessions", {
-      method: "POST",
-      body: JSON.stringify(req),
-    });
-  }
-
-  async getSession(id: string): Promise<Session> {
-    return this.request<Session>(`/api/sessions/${encodeURIComponent(id)}`);
+  async createCredentials(connectionName: string, accessDurationSec: number = 3600): Promise<CredentialsResponse> {
+    return this.request<CredentialsResponse>(
+      `/api/connections/${encodeURIComponent(connectionName)}/credentials`,
+      {
+        method: "POST",
+        body: JSON.stringify({ access_duration_sec: accessDurationSec } satisfies CredentialsRequest),
+      }
+    );
   }
 }
 

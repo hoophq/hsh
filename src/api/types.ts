@@ -21,24 +21,36 @@ export interface AccessSchema {
   cluster_name?: string;
 }
 
-export interface Session {
+export interface CredentialsRequest {
+  access_duration_sec: number;
+}
+
+export interface CredentialsResponse {
   id: string;
-  connection: string;
-  status: string;
-  user_email?: string;
-  metadata?: Record<string, string>;
-  script?: SessionScript;
+  connection_name: string;
+  connection_type: string;
+  connection_sub_type: string;
+  session_id: string;
+  has_review: boolean;
+  review_id?: string;
+  created_at: string;
+  expire_at: string;
+  connection_credentials?: SSHCredentials | HttpProxyCredentials;
 }
 
-export interface SessionScript {
-  data?: string;
+export interface SSHCredentials {
+  hostname: string;
+  port: string;
+  username: string;
+  password: string;
+  command: string;
 }
 
-export interface SessionCreateRequest {
-  connection: string;
-  type?: string;
-  metadata?: Record<string, string>;
-  script?: string;
+export interface HttpProxyCredentials {
+  hostname: string;
+  port: string;
+  proxy_token: string;
+  command: string;
 }
 
 export interface ApiError {
