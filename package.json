@@ -1,0 +1,26 @@
+{
+  "name": "hsh",
+  "version": "0.1.0",
+  "description": "Hoop Shell Plugins - Seamless access to infrastructure via shell integration",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "hsh": "src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "boxen": "^8.0.1",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "open": "^10.1.0",
+    "ora": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.4",
+    "typescript": "^5.7.3"
+  }
+}
