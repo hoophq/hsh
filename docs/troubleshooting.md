@@ -19,6 +19,26 @@ The mapping is locked down by [`tests/exit-codes.test.ts`](../tests/exit-codes.t
 
 Inventing more codes (e.g. `78` for \"API unreachable\") would fragment the script-callability contract for marginal value. The current behavior on API-unreachable is **passthrough** ([ENG-353](https://linear.app/hoophq/issue/ENG-353)), so the code your script sees is whatever the underlying `ssh`/`kubectl` returned — usually meaningful (network-related ssh exits 255). If a future ticket changes that policy and \"API unreachable\" needs its own code, `EX_UNAVAILABLE` (69) is the canonical pick.
 
+## kubectl context detection
+
+When you run `kubectl <command>`, hsh figures out which context that command would target — without shelling out to real kubectl — and matches it against your Hoop connections (per [`docs/connection-matching.md`](connection-matching.md)).
+
+The priority chain mirrors kubectl's own:
+
+1. **`--context X`** or **`--context=X`** — wins over everything.
+2. **`--kubeconfig=/path`** or **`--kubeconfig /path`** — uses that file's `current-context`.
+3. **`KUBECONFIG=/path/a:/path/b`** env var — colon-separated list, the first file with a `current-context` wins (matches kubectl's merge semantics).
+4. **`~/.kube/config`** — fallback default.
+5. **None of the above** — null → `hsh` falls open to native kubectl. This covers in-cluster pods (no kubeconfig at all) and genuinely-unconfigured environments.
+
+The detection runs purely on file reads (no `kubectl config current-context` shell-out). The full priority chain + every form is locked down by [`tests/kubectl-context.test.ts`](../tests/kubectl-context.test.ts).
+
+To see which source produced your context, set `HSH_DEBUG=1`:
+
+```
+[hsh debug] kubectl: context detection {"context":"prod-eks","source":"kubeconfig-env","fileConsulted":"/home/u/.kube/work-config"}
+```
+
 ## Common questions
 
 ### \"hsh ran the wrong connection\"
