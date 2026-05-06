@@ -10,30 +10,57 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Lint & Test
+  # Fast lint + typecheck job. Runs once on Linux; doesn't need the matrix
+  # since these checks aren't OS-dependent.
+  typecheck:
+    name: Typecheck
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
+    timeout-minutes: 5
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+  # Full test suite, including shell-integration tests, run across the
+  # supported (host OS, shell) combinations called out in the ENG-357 matrix.
+  # ubuntu-latest covers Linux/{bash,zsh,dash,fish}; macos-latest covers
+  # macOS/{bash 3.2,zsh,fish} which is the production target for many users.
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Install kubectl (for integration tests)
+      - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: latest
 
-      - name: Typecheck
-        run: bun run typecheck
+      # Install the additional shells the integration tests exercise.
+      # ubuntu-latest already has bash + dash + sh; we add zsh + fish.
+      # macos-latest already has bash 3.2 + zsh + sh; we add fish.
+      - name: Install shells (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish dash
+
+      - name: Install shells (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
 
       - name: Test
         run: bun test
