@@ -6,6 +6,11 @@ import { getCachedCredentials, cacheCredentials, clearCachedCredentials } from "
 import type { Connection, HttpProxyCredentials } from "../api/types.ts";
 import { spinner, error, info, warn, dim } from "../ui/output.ts";
 import { spawn } from "child_process";
+import {
+  buildKubeconfigEnv,
+  sweepOrphanKubeconfigs,
+  writeEphemeralKubeconfig,
+} from "./kubeconfig.ts";
 
 function getCurrentContext(args: string[]): string | null {
   for (let i = 0; i < args.length; i++) {
@@ -40,30 +45,14 @@ function findK8sConnection(connections: Connection[], contextName: string): Conn
   return null;
 }
 
-function injectKubeconfig(proxyUrl: string, token: string, contextName: string): void {
-  Bun.spawnSync(
-    ["kubectl", "config", "set-cluster", `hsh-${contextName}`,
-      `--server=${proxyUrl}`, "--insecure-skip-tls-verify=true"],
-    { env: process.env as Record<string, string> }
-  );
-  Bun.spawnSync(
-    ["kubectl", "config", "set-credentials", `hsh-${contextName}`, `--token=${token}`],
-    { env: process.env as Record<string, string> }
-  );
-  Bun.spawnSync(
-    ["kubectl", "config", "set-context", contextName,
-      `--cluster=hsh-${contextName}`, `--user=hsh-${contextName}`],
-    { env: process.env as Record<string, string> }
-  );
-}
-
 function isLocalAddress(host: string): boolean {
   return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
 }
 
-function execKubectl(args: string[]): Promise<void> {
-  return new Promise((resolve) => {
-    const child = spawn("kubectl", args, { stdio: "inherit" });
+function execKubectl(args: string[], extraEnv?: Record<string, string>): Promise<void> {
+  return new Promise(() => {
+    const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+    const child = spawn("kubectl", args, { stdio: "inherit", env });
     child.on("exit", (code) => process.exit(code ?? 0));
     child.on("error", (err) => {
       error(`Failed to start kubectl: ${err.message}`);
@@ -179,8 +168,20 @@ export const kubectlPlugin: Plugin = {
     const gatewayHost = isLocalAddress(creds.hostname) ? new URL(apiUrl).hostname : creds.hostname;
     const scheme = isLocalAddress(creds.hostname) ? "http" : "https";
     const proxyUrl = `${scheme}://${gatewayHost}:${creds.port}`;
-    injectKubeconfig(proxyUrl, creds.proxy_token, contextName);
 
-    return execKubectl(args);
+    // Render an ephemeral kubeconfig for this connection and merge it ahead
+    // of the user's existing KUBECONFIG (or default) for the spawned kubectl
+    // process only. The user's ~/.kube/config is never modified.
+    const hshKubeconfig = writeEphemeralKubeconfig(connection.name, {
+      contextName,
+      server: proxyUrl,
+      token: creds.proxy_token,
+    });
+    const kubeconfigEnv = buildKubeconfigEnv(hshKubeconfig, process.env.KUBECONFIG);
+
+    // Opportunistic cleanup of stale orphan kubeconfigs (older than 24h).
+    sweepOrphanKubeconfigs();
+
+    return execKubectl(args, { KUBECONFIG: kubeconfigEnv });
   },
 };

@@ -1,6 +1,10 @@
 import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from "fs";
 import { getHshDir } from "../config/store.ts";
+import {
+  clearAllEphemeralKubeconfigs,
+  clearEphemeralKubeconfig,
+} from "../plugins/kubeconfig.ts";
 import type { CredentialsResponse } from "../api/types.ts";
 
 const SESSIONS_DIR = "sessions";
@@ -34,6 +38,7 @@ export function getCachedCredentials(connectionName: string): CredentialsRespons
     // Consider expired 30s before actual expiry
     if (now.getTime() >= expireAt.getTime() - 30_000) {
       unlinkSync(path);
+      clearEphemeralKubeconfig(connectionName);
       return null;
     }
 
@@ -41,6 +46,7 @@ export function getCachedCredentials(connectionName: string): CredentialsRespons
   } catch {
     // Corrupt file — remove and return null
     try { unlinkSync(path); } catch {}
+    clearEphemeralKubeconfig(connectionName);
     return null;
   }
 }
@@ -55,14 +61,17 @@ export function clearCachedCredentials(connectionName: string): void {
   if (existsSync(path)) {
     try { unlinkSync(path); } catch {}
   }
+  clearEphemeralKubeconfig(connectionName);
 }
 
 export function clearAllCachedCredentials(): void {
   const dir = getSessionsDir();
-  if (!existsSync(dir)) return;
-  for (const file of readdirSync(dir)) {
-    if (file.endsWith(".json")) {
-      try { unlinkSync(join(dir, file)); } catch {}
+  if (existsSync(dir)) {
+    for (const file of readdirSync(dir)) {
+      if (file.endsWith(".json")) {
+        try { unlinkSync(join(dir, file)); } catch {}
+      }
     }
   }
+  clearAllEphemeralKubeconfigs();
 }
