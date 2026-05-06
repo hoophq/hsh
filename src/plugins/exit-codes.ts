@@ -12,6 +12,10 @@
  *         the credentials weren't issued yet. The user has been told to
  *         go approve it; their script should treat this as 'try again
  *         later', NOT as success.
+ *   77  | EX_NOPERM — Hoop session has expired (refresh token also dead).
+ *         The user has been told to run `hsh login`. Distinct from 75 so
+ *         scripts can differentiate "approval-pending, retry" from
+ *         "session-dead, needs interactive login".
  *   1   | generic hsh-internal error before the child could be spawned
  *         (e.g. malformed credentials response, unexpected throw). This
  *         collides with ssh's generic-1 but we have to ship something.
@@ -48,6 +52,17 @@ export const ExitCodes = {
    * 'connected and ran' from 'still waiting on review'.
    */
   ReviewPending: 75,
+
+  /**
+   * EX_NOPERM (sysexits.h §77). The Hoop session is dead (the gateway
+   * tried to refresh transparently via the X-New-Access-Token header
+   * and gave up — refresh token itself is expired/revoked). The user
+   * has been told to run `hsh login`. We deliberately do NOT auto-launch
+   * a browser mid-`ssh`/`kubectl` invocation: a sudden browser pop is
+   * surprising and disruptive (ENG-359). Distinct from ReviewPending so
+   * script wrappers can branch.
+   */
+  AuthRequired: 77,
 } as const;
 
 export type ExitCode = (typeof ExitCodes)[keyof typeof ExitCodes];

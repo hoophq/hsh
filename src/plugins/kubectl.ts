@@ -1,5 +1,10 @@
 import type { Plugin } from "./base.ts";
-import { ensureAuthenticated, forceReauthenticate } from "../auth/manager.ts";
+import {
+  ensureAuthenticated,
+  forceReauthenticate,
+  AuthRequiredError,
+  handleAuthRequiredAndExit,
+} from "../auth/manager.ts";
 import { getApiUrl } from "../config/store.ts";
 import { createClient, ApiUnreachableError, AuthExpiredError } from "../api/client.ts";
 import { getCachedCredentials, cacheCredentials, clearCachedCredentials } from "../auth/sessions.ts";
@@ -58,10 +63,15 @@ async function getK8sCredentials(
     return { resp, creds: resp.connection_credentials as HttpProxyCredentials };
   } catch (err) {
     if (err instanceof AuthExpiredError && !retried) {
-      debug("auth", `kubectl credential request rejected as expired; forcing re-auth name=${connectionName}`);
+      // Gateway returned 401 even though we sent a token. With the
+      // X-New-Access-Token transparent-refresh path (ENG-349), this
+      // only happens when even the server-side refresh token is dead.
+      // forceReauthenticate() now throws AuthRequiredError instead of
+      // auto-launching the browser; bubble it up so the run() entry
+      // point can format the canonical "session expired" UX.
+      debug("auth", `kubectl credential request rejected; refresh token also expired name=${connectionName}`);
       clearCachedCredentials(connectionName);
-      await forceReauthenticate();
-      return getK8sCredentials(connectionName, apiUrl, true);
+      await forceReauthenticate(); // never returns — throws AuthRequiredError
     }
     throw err;
   }
@@ -73,6 +83,21 @@ export const kubectlPlugin: Plugin = {
   wrappedCommand: "kubectl",
 
   async run(args: string[]): Promise<void> {
+    try {
+      return await runInner(args);
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        // Surfaced from forceReauthenticate() / ensureAuthenticated()
+        // anywhere inside runInner(). Print the canonical re-auth
+        // message and exit 77 (ExitCodes.AuthRequired). See ENG-359.
+        return handleAuthRequiredAndExit();
+      }
+      throw err;
+    }
+  },
+};
+
+async function runInner(args: string[]): Promise<void> {
     const detection = detectContext(args);
     const contextName = detection.context;
     debug("kubectl", `context detection`, {
@@ -96,8 +121,23 @@ export const kubectlPlugin: Plugin = {
       return execKubectl(args);
     }
 
-    let token = await ensureAuthenticated();
-    let client = createClient(apiUrl, token);
+    // ensureAuthenticated() throws AuthRequiredError if there is no
+    // usable token on disk (covered by the catch on `run()`).
+    let token: string;
+    try {
+      token = await ensureAuthenticated();
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        // No session at all: silently fall through to native kubectl.
+        // We don't want `kubectl version` etc. to fail just because the
+        // user hasn't logged into Hoop — same passthrough policy as
+        // the "API unreachable" branch.
+        debug("auth", "kubectl: no Hoop session; running kubectl directly");
+        return execKubectl(args);
+      }
+      throw err;
+    }
+    const client = createClient(apiUrl, token);
 
     const spin = spinner(`Looking up Kubernetes connection for context: ${contextName}...`);
 
@@ -111,21 +151,18 @@ export const kubectlPlugin: Plugin = {
         return execKubectl(args);
       }
       if (err instanceof AuthExpiredError) {
-        token = await forceReauthenticate();
-        client = createClient(apiUrl, token);
-        try {
-          connections = await client.listConnections();
-        } catch (retryErr) {
-          spin.stop();
-          if (retryErr instanceof ApiUnreachableError) {
-            warn(`Hoop API unreachable (${retryErr.reason}); running kubectl directly`);
-          }
-          return execKubectl(args);
-        }
-      } else {
+        // Gateway gave up on transparent refresh — refresh token is
+        // dead. Tell the user clearly and stop. We deliberately do
+        // NOT silently passthrough here: if the user *had* a Hoop
+        // session and it just died, running raw kubectl against the
+        // (likely Hoop-fronted) cluster will produce a confusing
+        // x509/auth error instead of an actionable message.
         spin.stop();
-        return execKubectl(args);
+        await forceReauthenticate(); // throws AuthRequiredError → caught by run() wrapper
       }
+      // Any other error (HTTP 5xx, parse error, …) is passthrough.
+      spin.stop();
+      return execKubectl(args);
     }
 
     const result = matchConnection(connections, contextName, "kubectl");
@@ -201,5 +238,4 @@ export const kubectlPlugin: Plugin = {
     sweepOrphanKubeconfigs();
 
     return execKubectl(args, { KUBECONFIG: kubeconfigEnv });
-  },
-};
+}
