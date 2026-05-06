@@ -15,8 +15,30 @@ function isLocalAddress(host: string): boolean {
   return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
 }
 
+/**
+ * Compute the spawn descriptor for SSH passthrough. Pure function; the
+ * contract for non-Hoop hosts is that this MUST equal what would happen if
+ * the user had typed `ssh <argv>` directly:
+ *
+ *   - argv passed through 1:1 (no rewrite, no injection)
+ *   - no env override (the child inherits hsh's env, which is the user's)
+ *   - stdio inherited so prompts, pty, scp/sftp pipelines all work
+ *   - no cwd override
+ *
+ * Exported so tests can lock the contract down without spawning a real
+ * process. See tests/ssh-passthrough.test.ts.
+ */
+export function buildPassthroughSpawn(args: string[]): {
+  cmd: string;
+  args: string[];
+  options: { stdio: "inherit" };
+} {
+  return { cmd: "ssh", args, options: { stdio: "inherit" } };
+}
+
 function passthrough(args: string[]): void {
-  const child = spawn("ssh", args, { stdio: "inherit" });
+  const desc = buildPassthroughSpawn(args);
+  const child = spawn(desc.cmd, desc.args, desc.options);
   child.on("exit", (code) => process.exit(code ?? 0));
   child.on("error", (err) => {
     error(`Failed to start ssh: ${err.message}`);
