@@ -8,28 +8,7 @@ import type { Connection, SSHCredentials, CredentialsResponse } from "../api/typ
 import { spinner, tokenBox, error, info, warn, dim } from "../ui/output.ts";
 import { spawn } from "child_process";
 import { parseSshArgs, rewriteSshArgs } from "./ssh-args.ts";
-
-function findConnection(connections: Connection[], hostname: string): Connection | null {
-  const exact = connections.find(
-    (c) => c.name === hostname || c.name === hostname.split(".")[0]
-  );
-  if (exact) return exact;
-
-  const byHost = connections.find((c) => c.access_schema?.ssh_host === hostname);
-  if (byHost) return byHost;
-
-  const byTag = connections.find(
-    (c) => c.tags?.hostname === hostname || c.tags?.host === hostname
-  );
-  if (byTag) return byTag;
-
-  const partial = connections.find(
-    (c) => c.name.includes(hostname) || hostname.includes(c.name)
-  );
-  if (partial) return partial;
-
-  return null;
-}
+import { formatAmbiguityWarning, matchConnection } from "./match.ts";
 
 function isLocalAddress(host: string): boolean {
   return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
@@ -121,8 +100,10 @@ export const sshPlugin: Plugin = {
       }
     }
 
-    const connection = findConnection(connections, hostname);
-    if (!connection) return passthrough(args);
+    const result = matchConnection(connections, hostname, "ssh");
+    if (!result.match) return passthrough(args);
+    if (result.ambiguous) warn(formatAmbiguityWarning(hostname, result));
+    const connection = result.match;
 
     // Get or reuse credentials
     const spin = spinner(`Connecting to ${connection.name} via Hoop...`);
