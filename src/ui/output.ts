@@ -39,7 +39,7 @@ export function tokenBox(opts: {
     `${chalk.dim("Connection:")} ${chalk.cyan(opts.connection)}`,
     `${chalk.dim("Token:")}      ${chalk.green(opts.token)}`,
     "",
-    chalk.dim(opts.instructions ?? "Copy this token when prompted"),
+    chalk.dim(opts.instructions ?? "Paste this token when ssh prompts for a password."),
     "",
   ];
 
