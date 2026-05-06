@@ -4,8 +4,10 @@ import {
   AuthExpiredError,
   DEFAULT_API_TIMEOUT_MS,
   fetchWithTimeout,
+  formatApiError,
   HoopApiClient,
 } from "../src/api/client.ts";
+import type { ApiError } from "../src/api/types.ts";
 
 /**
  * The PRD goal is "fail open to native commands within 2-3s". We assert
@@ -166,5 +168,59 @@ describe("HoopApiClient: error mapping", () => {
     } finally {
       server.stop();
     }
+  });
+});
+
+/**
+ * Regression: ENG-363. The `ApiError` thrown from `request()` is a plain
+ * object, not an `Error` instance, so `String(err)` rendered as the
+ * literal "[object Object]" and hid the actual gateway message. The
+ * helper unwraps `.message` for objects, falls back to native `.message`
+ * for `Error` subclasses, and stringifies anything else deterministically.
+ */
+describe("formatApiError", () => {
+  test("returns .message for ApiError-shaped plain objects (the [object Object] bug)", () => {
+    const err: ApiError = {
+      message: "connection subtype is not supported for this connection",
+      status: 400,
+    };
+    expect(formatApiError(err)).toBe(
+      "connection subtype is not supported for this connection",
+    );
+    // Confirms the bug we're fixing: bare String() did the wrong thing.
+    expect(String(err)).toBe("[object Object]");
+  });
+
+  test("returns .message for Error subclasses", () => {
+    expect(formatApiError(new Error("boom"))).toBe("boom");
+    expect(formatApiError(new TypeError("nope"))).toBe("nope");
+  });
+
+  test("returns .message for the typed errors thrown by this module", () => {
+    expect(formatApiError(new ApiUnreachableError("timeout"))).toBe(
+      "Hoop API unreachable: timeout",
+    );
+    expect(formatApiError(new AuthExpiredError())).toBe(
+      "Authentication expired",
+    );
+  });
+
+  test("stringifies bare strings and primitives", () => {
+    expect(formatApiError("plain")).toBe("plain");
+    expect(formatApiError(42)).toBe("42");
+    expect(formatApiError(undefined)).toBe("undefined");
+    expect(formatApiError(null)).toBe("null");
+  });
+
+  test("handles objects whose .message is non-string defensively", () => {
+    // No throw, returns a deterministic representation. We don't care
+    // about the exact format — only that it stays a string.
+    const out = formatApiError({ message: { nested: true } });
+    expect(typeof out).toBe("string");
+    expect(out.length).toBeGreaterThan(0);
+  });
+
+  test("falls back to String() for objects without a .message field", () => {
+    expect(formatApiError({ status: 500 })).toBe("[object Object]");
   });
 });

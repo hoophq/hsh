@@ -7,7 +7,7 @@ import {
 } from "../auth/manager.ts";
 import { getApiUrl } from "../config/store.ts";
 import { isAuthenticated } from "../auth/store.ts";
-import { createClient, ApiUnreachableError, AuthExpiredError } from "../api/client.ts";
+import { createClient, ApiUnreachableError, AuthExpiredError, formatApiError } from "../api/client.ts";
 import { getCachedCredentials, cacheCredentials, clearCachedCredentials } from "../auth/sessions.ts";
 import type { Connection, SSHCredentials, CredentialsResponse } from "../api/types.ts";
 import { spinner, tokenBox, error, info, warn, dim } from "../ui/output.ts";
@@ -212,8 +212,7 @@ async function runInner(args: string[]): Promise<void> {
         return passthrough(args);
       }
       spin.fail("Failed to create credentials");
-      const msg = err && typeof err === "object" && "message" in err ? (err as { message: string }).message : String(err);
-      error(msg);
+      error(formatApiError(err));
       process.exit(ExitCodes.GenericError);
     }
 

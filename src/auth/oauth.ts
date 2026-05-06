@@ -1,6 +1,6 @@
 import { saveTokenFromJwt } from "./store.ts";
 import { getApiUrl } from "../config/store.ts";
-import { fetchWithTimeout } from "../api/client.ts";
+import { fetchWithTimeout, formatApiError } from "../api/client.ts";
 import { error, success, info, warn } from "../ui/output.ts";
 import open from "open";
 
@@ -45,8 +45,7 @@ export async function performOAuthLogin(): Promise<void> {
     }
     browserUrl = body.login_url;
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    error(`Failed to get login URL: ${msg}`);
+    error(`Failed to get login URL: ${formatApiError(err)}`);
     warn("Make sure the API URL is correct: " + apiUrl);
     process.exit(1);
   }

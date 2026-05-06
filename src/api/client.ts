@@ -30,6 +30,35 @@ export class AuthExpiredError extends Error {
 }
 
 /**
+ * Render an error caught from a try/catch into a user-facing string.
+ *
+ * Handles three shapes uniformly:
+ *   - `Error` (and subclasses)  → `err.message`
+ *   - `ApiError`-shaped objects → `err.message` (the typed shape thrown
+ *     by `HoopApiClient.request()` for non-2xx responses; not an `Error`
+ *     instance, so `instanceof Error` misses it)
+ *   - anything else (string, number, undefined, …) → `String(err)`
+ *
+ * The `ApiError` branch is the one this helper exists for: catch blocks
+ * scattered across the codebase used to do `String(err)` on it directly,
+ * which renders as the literal "[object Object]" and hides the actual
+ * gateway error (e.g. "connection subtype is not supported"). See
+ * ENG-363 for the live reproduction.
+ *
+ * Defensive on the message field — if `err.message` happens to itself
+ * be a non-string (an object, undefined), `String(...)` gives at least
+ * a deterministic representation rather than throwing.
+ */
+export function formatApiError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err !== null && typeof err === "object" && "message" in err) {
+    const m = (err as { message: unknown }).message;
+    return typeof m === "string" ? m : String(m);
+  }
+  return String(err);
+}
+
+/**
  * The Hoop API is unreachable (timeout, DNS failure, refused connection,
  * connection reset, etc.). Callers should warn the user and fall through
  * to native passthrough rather than blocking the terminal.

@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { join } from "path";
-import { ApiUnreachableError } from "../api/client.ts";
+import { ApiUnreachableError, formatApiError } from "../api/client.ts";
 import {
   fetchLatestRelease,
   findAsset,
@@ -54,7 +54,7 @@ export const updateCommand = new Command("update")
         error(`Could not reach GitHub Releases: ${err.reason}`);
         process.exit(ExitCodes.GenericError);
       }
-      error(`Update check failed: ${String(err)}`);
+      error(`Update check failed: ${formatApiError(err)}`);
       process.exit(ExitCodes.GenericError);
     }
     if (!release) {
@@ -161,7 +161,7 @@ export const updateCommand = new Command("update")
       if (err instanceof ApiUnreachableError) {
         error(`Download failed: ${err.reason}`);
       } else {
-        error(`Update failed: ${String(err)}`);
+        error(`Update failed: ${formatApiError(err)}`);
       }
       process.exit(ExitCodes.GenericError);
     }
