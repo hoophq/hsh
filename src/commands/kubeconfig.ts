@@ -10,6 +10,7 @@ import {
   ApiUnreachableError,
   AuthExpiredError,
   createClient,
+  formatApiError,
 } from "../api/client.ts";
 import {
   cacheCredentials,
@@ -119,7 +120,7 @@ async function runKubeconfig(
         // tried to refresh transparently and gave up.
         await forceReauthenticate(); // throws AuthRequiredError
       }
-      error(`Failed to list connections: ${String(err)}`);
+      error(`Failed to list connections: ${formatApiError(err)}`);
       process.exit(ExitCodes.GenericError);
     }
 
@@ -158,7 +159,7 @@ async function runKubeconfig(
           error(`Hoop API unreachable: ${err.reason}`);
           process.exit(ExitCodes.GenericError);
         }
-        error(`Failed to issue credentials: ${String(err)}`);
+        error(`Failed to issue credentials: ${formatApiError(err)}`);
         process.exit(ExitCodes.GenericError);
       }
     }
