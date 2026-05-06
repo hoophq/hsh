@@ -61,6 +61,12 @@ Every `process.exit()` in `src/plugins/ssh.ts`, `src/plugins/kubectl.ts`, and `s
 - `src/config/store.ts` — config file CRUD; honors `HSH_HOME`.
 - `tests/shell/` — reusable scenario scripts for shell integration tests.
 
+## Nix (flake.nix)
+- **Install**: `nix profile install github:hoophq/hsh` or `nix run github:hoophq/hsh -- ...`
+- **Dev shell**: `nix develop` (provides bun, bun2nix, kubectl)
+- **Dependency lock**: `bun.nix` is auto-generated from `bun.lock` via `nix run github:nix-community/bun2nix`. Re-run after `bun install` changes deps. The release workflow regenerates `bun.nix` and `flake.lock` automatically on every tag push.
+- **Build**: uses `bun2nix` overlay → `fetchBunDeps` (fixed-output, fetches npm packages) → `bun build --compile` (sandboxed). No network access needed during the final build phase.
+
 ## Docs
 - `docs/connection-matching.md` — matching rules.
 - `docs/architecture/kubectl.md` — kubectl plugin design.

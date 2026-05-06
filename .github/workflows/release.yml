@@ -5,13 +5,15 @@ name: Release
 # What it does:
 #   1. Verifies the tag is on main (or any branch — we don't gate, but the bump
 #      commit will be pushed to main).
-#   2. Bumps src/version.ts and package.json to match the tag, commits the
-#      bump on top of main, and force-moves the tag to the bump commit so the
-#      published binaries report the correct version.
-#   3. Cross-compiles all 5 targets on a single ubuntu runner via the existing
+#   2. Bumps src/version.ts and package.json to match the tag.
+#   3. Regenerates bun.nix from bun.lock (via bun2nix) and updates flake.lock
+#      so the Nix flake stays in sync.
+#   4. Commits the bump + lockfile changes on top of main, and force-moves the
+#      tag to the bump commit so the published binaries report the correct version.
+#   5. Cross-compiles all 5 targets on a single ubuntu runner via the existing
 #      scripts/build.ts (Bun --compile handles cross-targeting natively).
-#   4. Generates SHA256SUMS over the raw binaries.
-#   5. Creates a GitHub Release with the binaries and SHA256SUMS attached.
+#   6. Generates SHA256SUMS over the raw binaries.
+#   7. Creates a GitHub Release with the binaries and SHA256SUMS attached.
 #
 # Notes on the version bump:
 #   - The maintainer pushes a tag (e.g. `git tag v0.2.0 && git push origin v0.2.0`).
@@ -41,7 +43,7 @@ jobs:
   release:
     name: Build and release
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout main (we'll commit the version bump here)
         uses: actions/checkout@v4
@@ -113,7 +115,29 @@ jobs:
           echo "--- src/version.ts ---"
           cat src/version.ts
 
-      - name: Commit and move tag
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Regenerate bun.nix from bun.lock
+        run: |
+          nix run github:nix-community/bun2nix -- \
+            --lock-file bun.lock \
+            --output-file bun.nix
+          echo "--- bun.nix ---"
+          head -5 bun.nix
+
+      - name: Update flake.lock
+        run: |
+          nix flake lock
+          echo "--- flake.lock (updated) ---"
+          echo "Updated."
+
+      - name: Commit version bump and lockfile updates
         env:
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -122,10 +146,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Only commit if there's actually a diff (idempotency: re-running
           # the workflow on the same tag shouldn't produce empty commits).
-          if git diff --quiet -- package.json src/version.ts; then
-            echo "Version files already at $VERSION; skipping bump commit."
+          if git diff --quiet -- package.json src/version.ts bun.nix flake.lock; then
+            echo "Version and lock files already at $VERSION; skipping bump commit."
           else
-            git add package.json src/version.ts
+            git add package.json src/version.ts bun.nix flake.lock
             git commit -m "chore(release): $VERSION [skip ci]"
             git push origin main
           fi
@@ -133,9 +157,6 @@ jobs:
           # artifacts come from a commit whose VERSION constant matches the tag.
           git tag -f "$TAG"
           git push origin "$TAG" --force
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
 
       - name: Build binaries for all targets
         run: bun run build
