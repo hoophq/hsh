@@ -7,83 +7,7 @@ import { getCachedCredentials, cacheCredentials, clearCachedCredentials } from "
 import type { Connection, SSHCredentials, CredentialsResponse } from "../api/types.ts";
 import { spinner, tokenBox, error, info, dim } from "../ui/output.ts";
 import { spawn } from "child_process";
-
-function extractHostname(args: string[]): string | null {
-  const flagsWithValues = new Set([
-    "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
-    "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
-  ]);
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--") break;
-    if (arg.startsWith("-")) {
-      if (flagsWithValues.has(arg)) i++;
-      continue;
-    }
-    return arg.includes("@") ? arg.split("@").pop()! : arg;
-  }
-
-  return null;
-}
-
-function rewriteArgs(
-  originalArgs: string[],
-  creds: SSHCredentials,
-  gatewayHost: string,
-): string[] {
-  const flagsWithValues = new Set([
-    "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
-    "-L", "-l", "-m", "-O", "-o", "-Q", "-R", "-S", "-W", "-w",
-  ]);
-
-  const result: string[] = [];
-  let destinationReplaced = false;
-  let portReplaced = false;
-
-  for (let i = 0; i < originalArgs.length; i++) {
-    const arg = originalArgs[i];
-
-    if (arg === "--") {
-      result.push(...originalArgs.slice(i));
-      break;
-    }
-
-    if (arg === "-p" && i + 1 < originalArgs.length) {
-      result.push("-p", creds.port);
-      portReplaced = true;
-      i++;
-      continue;
-    }
-
-    if (arg === "-l" && i + 1 < originalArgs.length) {
-      i++; // Drop -l user
-      continue;
-    }
-
-    if (arg.startsWith("-")) {
-      result.push(arg);
-      if (flagsWithValues.has(arg) && i + 1 < originalArgs.length) {
-        result.push(originalArgs[++i]);
-      }
-      continue;
-    }
-
-    if (!destinationReplaced) {
-      result.push(`${creds.username}@${gatewayHost}`);
-      destinationReplaced = true;
-      continue;
-    }
-
-    result.push(arg);
-  }
-
-  if (!portReplaced) {
-    result.unshift("-p", creds.port);
-  }
-
-  return result;
-}
+import { parseSshArgs, rewriteSshArgs } from "./ssh-args.ts";
 
 function findConnection(connections: Connection[], hostname: string): Connection | null {
   const exact = connections.find(
@@ -162,7 +86,8 @@ export const sshPlugin: Plugin = {
   wrappedCommand: "ssh",
 
   async run(args: string[]): Promise<void> {
-    const hostname = extractHostname(args);
+    const parsed = parseSshArgs(args);
+    const hostname = parsed.host;
     if (!hostname) return passthrough(args);
 
     const apiUrl = getApiUrl();
@@ -236,7 +161,11 @@ export const sshPlugin: Plugin = {
       instructions: "Use the password above when prompted",
     });
 
-    const sshArgs = rewriteArgs(args, creds, gatewayHost);
+    const sshArgs = rewriteSshArgs(parsed, {
+      newUser: creds.username,
+      newHost: gatewayHost,
+      newPort: creds.port,
+    });
 
     info(`Connecting: ssh ${sshArgs.join(" ")}`);
     console.log();
