@@ -1,6 +1,7 @@
 import { homedir } from "os";
 import { join } from "path";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { mkdirSync, readFileSync, existsSync } from "fs";
+import { safeWriteJson } from "../util/safe-write.ts";
 
 export interface HshConfig {
   apiUrl?: string;
@@ -44,7 +45,9 @@ export function getConfig(): HshConfig {
 
 function saveConfig(config: HshConfig): void {
   ensureDir();
-  writeFileSync(configPath(), JSON.stringify(config, null, 2) + "\n");
+  // Atomic write — config edits from multiple commands (e.g. `hsh config set`
+  // racing in two shells) must not leave torn JSON.
+  safeWriteJson(configPath(), config);
 }
 
 export function getApiUrl(): string | undefined {

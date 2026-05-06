@@ -1,6 +1,7 @@
 import { join } from "path";
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
+import { readFileSync, existsSync, unlinkSync } from "fs";
 import { getHshDir } from "../config/store.ts";
+import { safeWriteJson } from "../util/safe-write.ts";
 
 export interface AuthData {
   token: string;
@@ -37,9 +38,10 @@ export function getToken(): string | null {
 }
 
 export function saveToken(token: string, expiresAt: string, email?: string): void {
-  const path = getAuthPath();
   const data: AuthData = { token, expiresAt, email };
-  writeFileSync(path, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+  // Atomic write — concurrent shells racing on auth refresh must never see
+  // a torn JSON file (which would force a spurious OAuth round-trip).
+  safeWriteJson(getAuthPath(), data, { mode: 0o600 });
 }
 
 export function clearToken(): void {
