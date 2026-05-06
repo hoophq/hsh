@@ -14,19 +14,7 @@ import {
 } from "./kubeconfig.ts";
 import { formatAmbiguityWarning, matchConnection } from "./match.ts";
 import { ExitCodes } from "./exit-codes.ts";
-
-function getCurrentContext(args: string[]): string | null {
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--context" && i + 1 < args.length) return args[i + 1];
-    if (args[i].startsWith("--context=")) return args[i].split("=")[1];
-  }
-
-  const result = Bun.spawnSync(["kubectl", "config", "current-context"], {
-    env: process.env as Record<string, string>,
-  });
-
-  return result.exitCode === 0 ? result.stdout.toString().trim() || null : null;
-}
+import { detectContext } from "./kubectl-context.ts";
 
 function isLocalAddress(host: string): boolean {
   return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
@@ -85,9 +73,19 @@ export const kubectlPlugin: Plugin = {
   wrappedCommand: "kubectl",
 
   async run(args: string[]): Promise<void> {
-    const contextName = getCurrentContext(args);
-    debug("kubectl", `context detected: ${contextName ?? "<none>"}`);
+    const detection = detectContext(args);
+    const contextName = detection.context;
+    debug("kubectl", `context detection`, {
+      context: contextName,
+      source: detection.source,
+      fileConsulted: detection.fileConsulted,
+    });
     if (!contextName) {
+      // 'none' means no kubeconfig was found anywhere — likely in-cluster
+      // (pod running kubectl) or genuinely unconfigured. Either way we
+      // can't match a Hoop connection, so let kubectl handle it.
+      // Other source values reaching here mean the file existed but had no
+      // current-context set; same outcome.
       warn("No kubectl context detected. Running kubectl directly.");
       return execKubectl(args);
     }
