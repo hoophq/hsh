@@ -23,6 +23,14 @@ name: Release
 #     doesn't run twice for the same change.
 #   - The workflow uses GITHUB_TOKEN with `contents: write` to push the bump
 #     commit and rewrite the tag. No PAT required.
+#
+# Notes on the brew tap dispatch:
+#   - After the release succeeds, the workflow dispatches a `hsh-release`
+#     repository_dispatch event to hoophq/brew so its release-hsh.yml regenerates
+#     hsh.rb with the new version + checksums.
+#   - This requires a fine-grained PAT stored as the secret BREW_DISPATCH_TOKEN
+#     with `Contents: read & write` permission on hoophq/brew. The dispatch
+#     step gracefully skips (with a warning) if the secret isn't configured.
 
 on:
   push:
@@ -207,3 +215,29 @@ jobs:
               dist/hsh-windows-x64.exe \
               dist/SHA256SUMS
           fi
+
+      - name: Trigger brew tap update (hoophq/brew)
+        # Only fires for stable releases; pre-releases shouldn't move the
+        # `brew install hsh` default. The Homebrew formula always tracks the
+        # latest stable.
+        if: steps.version.outputs.prerelease == 'false'
+        env:
+          # Fine-grained PAT with Contents: read & write on hoophq/brew.
+          # If unset, skip gracefully — release itself already succeeded.
+          BREW_TOKEN: ${{ secrets.BREW_DISPATCH_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$BREW_TOKEN" ]; then
+            echo "::warning::BREW_DISPATCH_TOKEN secret not set; skipping brew tap dispatch."
+            echo "::warning::Run the brew tap workflow manually with version=$VERSION to update hsh.rb."
+            exit 0
+          fi
+          # repository_dispatch event triggers .github/workflows/release-hsh.yml
+          # in hoophq/brew. The brew workflow reads client_payload.version.
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $BREW_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/hoophq/brew/dispatches \
+            -d "$(printf '{"event_type":"hsh-release","client_payload":{"version":"%s"}}' "$VERSION")"
+          echo "Dispatched hsh-release event to hoophq/brew with version=$VERSION"
