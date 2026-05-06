@@ -27,6 +27,11 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install kubectl (for integration tests)
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
       - name: Typecheck
         run: bun run typecheck
 

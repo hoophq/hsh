@@ -7,27 +7,44 @@ export interface HshConfig {
   [key: string]: string | undefined;
 }
 
-const HSH_DIR = join(homedir(), ".hsh");
-const CONFIG_PATH = join(HSH_DIR, "config.json");
+/**
+ * Resolve the hsh state directory.
+ *
+ * Honors `HSH_HOME` (full path override) or falls back to `~/.hsh`. Resolved
+ * lazily on every call so tests / sandboxes can override per-process via
+ * `process.env.HSH_HOME`. `homedir()` is cached by Bun at startup, so it
+ * cannot be overridden mid-process — `HSH_HOME` is the supported escape hatch.
+ */
+function hshDir(): string {
+  const override = process.env.HSH_HOME;
+  if (override && override.trim() !== "") return override;
+  return join(homedir(), ".hsh");
+}
+
+function configPath(): string {
+  return join(hshDir(), "config.json");
+}
 
 function ensureDir(): void {
-  if (!existsSync(HSH_DIR)) {
-    mkdirSync(HSH_DIR, { recursive: true });
+  const dir = hshDir();
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
 }
 
 export function getConfig(): HshConfig {
   ensureDir();
-  if (!existsSync(CONFIG_PATH)) {
+  const path = configPath();
+  if (!existsSync(path)) {
     return {};
   }
-  const raw = readFileSync(CONFIG_PATH, "utf-8");
+  const raw = readFileSync(path, "utf-8");
   return JSON.parse(raw) as HshConfig;
 }
 
 function saveConfig(config: HshConfig): void {
   ensureDir();
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+  writeFileSync(configPath(), JSON.stringify(config, null, 2) + "\n");
 }
 
 export function getApiUrl(): string | undefined {
@@ -52,5 +69,5 @@ export function getConfigValue(key: string): string | undefined {
 
 export function getHshDir(): string {
   ensureDir();
-  return HSH_DIR;
+  return hshDir();
 }
