@@ -100,14 +100,15 @@ jobs:
             const fs = require("fs");
             const path = "src/version.ts";
             const src = fs.readFileSync(path, "utf8");
-            const out = src.replace(
-              /export const VERSION = "[^"]*";/,
-              `export const VERSION = "${process.env.NEW_VERSION}";`
-            );
-            if (out === src) {
-              console.error("Failed to substitute VERSION in " + path);
+            const versionRe = /export const VERSION = "[^"]*";/;
+            if (!versionRe.test(src)) {
+              console.error("Failed to find VERSION constant in " + path);
               process.exit(1);
             }
+            const out = src.replace(
+              versionRe,
+              `export const VERSION = "${process.env.NEW_VERSION}";`
+            );
             fs.writeFileSync(path, out);
           '
           echo "--- package.json ---"
