@@ -1,5 +1,10 @@
 import type { Plugin } from "./base.ts";
-import { ensureAuthenticated, forceReauthenticate } from "../auth/manager.ts";
+import {
+  ensureAuthenticated,
+  forceReauthenticate,
+  AuthRequiredError,
+  handleAuthRequiredAndExit,
+} from "../auth/manager.ts";
 import { getApiUrl } from "../config/store.ts";
 import { isAuthenticated } from "../auth/store.ts";
 import { createClient, ApiUnreachableError, AuthExpiredError } from "../api/client.ts";
@@ -78,11 +83,15 @@ async function getCredentials(
     return { resp, creds: resp.connection_credentials as SSHCredentials };
   } catch (err) {
     if (err instanceof AuthExpiredError && !retried) {
-      debug("auth", `ssh credential request rejected as expired; forcing re-auth name=${connectionName}`);
-      // Token expired server-side — force re-auth and retry
+      // Gateway returned 401 — with the X-New-Access-Token transparent
+      // refresh path (ENG-349), this means the server-side refresh
+      // token itself is dead. forceReauthenticate() now throws
+      // AuthRequiredError instead of auto-launching the browser; let
+      // it bubble up to the run() wrapper which prints the canonical
+      // "session expired, run hsh login" message and exits 77.
+      debug("auth", `ssh credential request rejected; refresh token also expired name=${connectionName}`);
       clearCachedCredentials(connectionName);
-      await forceReauthenticate();
-      return getCredentials(connectionName, apiUrl, true);
+      await forceReauthenticate(); // never returns — throws AuthRequiredError
     }
     throw err;
   }
@@ -94,6 +103,21 @@ export const sshPlugin: Plugin = {
   wrappedCommand: "ssh",
 
   async run(args: string[]): Promise<void> {
+    try {
+      return await runInner(args);
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        // Surfaced from forceReauthenticate() / ensureAuthenticated()
+        // anywhere inside runInner(). Print the canonical re-auth
+        // message and exit 77 (ExitCodes.AuthRequired). See ENG-359.
+        return handleAuthRequiredAndExit();
+      }
+      throw err;
+    }
+  },
+};
+
+async function runInner(args: string[]): Promise<void> {
     const parsed = parseSshArgs(args);
     const hostname = parsed.host;
     debug("ssh", `argv parsed`, {
@@ -113,9 +137,22 @@ export const sshPlugin: Plugin = {
       return passthrough(args);
     }
 
-    // Look up connection — on AuthExpired, re-auth and retry
-    let token = await ensureAuthenticated();
-    let client = createClient(apiUrl, token);
+    // Look up connection. ensureAuthenticated() throws AuthRequiredError
+    // if no usable token is on disk; in that case fall through to
+    // native ssh (the user might be ssh'ing somewhere unrelated to
+    // Hoop and shouldn't be forced to log in just for `ssh github.com`).
+    // The same passthrough policy is used for ApiUnreachableError.
+    let token: string;
+    try {
+      token = await ensureAuthenticated();
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        debug("ssh", "no Hoop session; running ssh directly");
+        return passthrough(args);
+      }
+      throw err;
+    }
+    const client = createClient(apiUrl, token);
 
     let connections: Connection[];
     try {
@@ -126,19 +163,15 @@ export const sshPlugin: Plugin = {
         return passthrough(args);
       }
       if (err instanceof AuthExpiredError) {
-        token = await forceReauthenticate();
-        client = createClient(apiUrl, token);
-        try {
-          connections = await client.listConnections();
-        } catch (retryErr) {
-          if (retryErr instanceof ApiUnreachableError) {
-            warn(`Hoop API unreachable (${retryErr.reason}); running ssh directly`);
-          }
-          return passthrough(args);
-        }
-      } else {
-        return passthrough(args);
+        // Gateway gave up on transparent refresh — refresh token is
+        // dead. Force a clean exit with the canonical "session expired"
+        // UX (caught by run() wrapper). We don't passthrough here:
+        // if the user *had* a Hoop session, ssh'ing past the gateway
+        // would yield a confusing auth error rather than an actionable
+        // "run hsh login" message.
+        await forceReauthenticate(); // throws AuthRequiredError
       }
+      return passthrough(args);
     }
 
     const result = matchConnection(connections, hostname, "ssh");
@@ -224,5 +257,4 @@ export const sshPlugin: Plugin = {
       error(`Failed to start ssh: ${err.message}`);
       process.exit(ExitCodes.GenericError);
     });
-  },
-};
+}
