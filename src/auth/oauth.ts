@@ -1,7 +1,16 @@
 import { saveTokenFromJwt } from "./store.ts";
 import { getApiUrl } from "../config/store.ts";
+import { fetchWithTimeout } from "../api/client.ts";
 import { error, success, info, warn } from "../ui/output.ts";
 import open from "open";
+
+/**
+ * The login URL fetch is part of an interactive flow — the user is sitting
+ * at the terminal waiting to authenticate. Use a more generous timeout than
+ * the 3s default for non-interactive plugin calls, but still short enough
+ * to fail fast on a misconfigured API URL.
+ */
+const LOGIN_API_TIMEOUT_MS = 10_000;
 
 // Fixed port matching the Hoop gateway's default: http://127.0.0.1:3587/callback
 // See: hoophq/hoop common/proto/const.go → ClientLoginCallbackAddress
@@ -23,7 +32,9 @@ export async function performOAuthLogin(): Promise<void> {
   // 2. Request the login URL from the gateway
   let browserUrl: string;
   try {
-    const response = await fetch(`${apiUrl}/api/login`);
+    const response = await fetchWithTimeout(`${apiUrl}/api/login`, {
+      timeoutMs: LOGIN_API_TIMEOUT_MS,
+    });
     if (!response.ok) {
       const body = (await response.json().catch(() => ({}))) as { message?: string };
       throw new Error(body.message ?? `API returned ${response.status}`);
