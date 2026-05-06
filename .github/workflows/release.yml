@@ -1,0 +1,187 @@
+name: Release
+
+# Triggered by pushing a tag of the form v* (e.g. v0.2.0, v1.0.0-rc.1).
+#
+# What it does:
+#   1. Verifies the tag is on main (or any branch — we don't gate, but the bump
+#      commit will be pushed to main).
+#   2. Bumps src/version.ts and package.json to match the tag, commits the
+#      bump on top of main, and force-moves the tag to the bump commit so the
+#      published binaries report the correct version.
+#   3. Cross-compiles all 5 targets on a single ubuntu runner via the existing
+#      scripts/build.ts (Bun --compile handles cross-targeting natively).
+#   4. Generates SHA256SUMS over the raw binaries.
+#   5. Creates a GitHub Release with the binaries and SHA256SUMS attached.
+#
+# Notes on the version bump:
+#   - The maintainer pushes a tag (e.g. `git tag v0.2.0 && git push origin v0.2.0`).
+#     They do NOT need to bump package.json/version.ts beforehand — the workflow
+#     does that and rewrites the tag to point at the bump commit.
+#   - The bump commit is pushed to main with `[skip ci]` so the CI workflow
+#     doesn't run twice for the same change.
+#   - The workflow uses GITHUB_TOKEN with `contents: write` to push the bump
+#     commit and rewrite the tag. No PAT required.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+# Serialize releases per-tag. If a force-push of the same tag re-triggers
+# the workflow (depends on GitHub semantics), we don't want two runs racing
+# to push commits and create the release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout main (we'll commit the version bump here)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # Need full history so we can push a new commit on top of main.
+          fetch-depth: 0
+          # Use the default GITHUB_TOKEN; `permissions: contents: write` above
+          # gives it push rights, including the ability to move tags.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          # Light semver sanity check; reject obviously bad tags early.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' does not look like semver (expected v<MAJOR>.<MINOR>.<PATCH>[-pre][+build])"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Detect prereleases (anything with a `-` after the patch number) so
+          # the GitHub Release is marked correctly.
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Bump package.json and src/version.ts to ${{ steps.version.outputs.version }}
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Update package.json via bun's own CLI to preserve formatting.
+          # Falls back to a node one-liner if bun pm version isn't available
+          # in this bun release.
+          if ! bun pm version "$NEW_VERSION" --no-git-tag-version 2>/dev/null; then
+            node -e '
+              const fs = require("fs");
+              const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+              p.version = process.env.NEW_VERSION;
+              fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n");
+            '
+          fi
+          # Update src/version.ts. We do a literal replacement on the VERSION
+          # constant so unrelated text in the file is preserved.
+          node -e '
+            const fs = require("fs");
+            const path = "src/version.ts";
+            const src = fs.readFileSync(path, "utf8");
+            const out = src.replace(
+              /export const VERSION = "[^"]*";/,
+              `export const VERSION = "${process.env.NEW_VERSION}";`
+            );
+            if (out === src) {
+              console.error("Failed to substitute VERSION in " + path);
+              process.exit(1);
+            }
+            fs.writeFileSync(path, out);
+          '
+          echo "--- package.json ---"
+          grep '"version"' package.json
+          echo "--- src/version.ts ---"
+          cat src/version.ts
+
+      - name: Commit and move tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Only commit if there's actually a diff (idempotency: re-running
+          # the workflow on the same tag shouldn't produce empty commits).
+          if git diff --quiet -- package.json src/version.ts; then
+            echo "Version files already at $VERSION; skipping bump commit."
+          else
+            git add package.json src/version.ts
+            git commit -m "chore(release): $VERSION [skip ci]"
+            git push origin main
+          fi
+          # Re-point the tag at the (possibly new) HEAD so the released
+          # artifacts come from a commit whose VERSION constant matches the tag.
+          git tag -f "$TAG"
+          git push origin "$TAG" --force
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build binaries for all targets
+        run: bun run build
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          # `sha256sum -b` style is portable. We strip the leading `./` so the
+          # file looks clean when consumers verify with `sha256sum -c`.
+          sha256sum hsh-* > SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [ "$PRERELEASE" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          # `gh release create` is idempotent only via separate check; if a
+          # release for this tag already exists (e.g. workflow re-run), upload
+          # the assets to it instead of failing.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; uploading/clobbering assets."
+            gh release upload "$TAG" \
+              dist/hsh-linux-x64 \
+              dist/hsh-linux-arm64 \
+              dist/hsh-darwin-x64 \
+              dist/hsh-darwin-arm64 \
+              dist/hsh-windows-x64.exe \
+              dist/SHA256SUMS \
+              --clobber
+          else
+            gh release create "$TAG" \
+              --title "hsh $VERSION" \
+              --generate-notes \
+              $PRERELEASE_FLAG \
+              dist/hsh-linux-x64 \
+              dist/hsh-linux-arm64 \
+              dist/hsh-darwin-x64 \
+              dist/hsh-darwin-arm64 \
+              dist/hsh-windows-x64.exe \
+              dist/SHA256SUMS
+          fi

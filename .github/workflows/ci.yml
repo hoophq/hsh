@@ -14,6 +14,10 @@ jobs:
   # since these checks aren't OS-dependent.
   typecheck:
     name: Typecheck
+    # Skip the auto-generated release bump commit (release.yml writes these
+    # with `[skip ci]` in the subject so we don't run the full matrix on a
+    # version-only diff).
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -30,6 +34,7 @@ jobs:
   # macOS/{bash 3.2,zsh,fish} which is the production target for many users.
   test:
     name: Test (${{ matrix.os }})
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
