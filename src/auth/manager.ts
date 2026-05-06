@@ -1,9 +1,12 @@
 import { isAuthenticated, getToken, clearToken } from "./store.ts";
 import { clearAllCachedCredentials } from "./sessions.ts";
 import { performOAuthLogin } from "./oauth.ts";
+import { performLocalAuthLogin, reportSetupRequired } from "./local.ts";
 import { getApiUrl } from "../config/store.ts";
-import { error } from "../ui/output.ts";
+import { error, warn } from "../ui/output.ts";
 import { ExitCodes } from "../plugins/exit-codes.ts";
+import { getPublicServerInfo } from "../api/serverinfo.ts";
+import { ApiUnreachableError, formatApiError } from "../api/client.ts";
 import chalk from "chalk";
 
 /**
@@ -67,11 +70,71 @@ export async function forceReauthenticate(): Promise<never> {
 }
 
 /**
- * Interactive `hsh login` — the ONE place that launches the browser
- * automatically. Unchanged from previous behavior.
+ * Interactive `hsh login` — orchestrator that picks the right flow
+ * based on the gateway's `auth_method`:
+ *
+ *   - "oidc"  → browser OAuth (existing behavior)
+ *   - "local" → email/password prompt + POST /api/localauth/login
+ *   - "saml"  → not yet supported; clear error
+ *   - other   → unsupported method; clear error
+ *
+ * The pre-flight `/api/publicserverinfo` call also surfaces
+ * `setup_required: true` for fresh single-tenant local-auth gateways
+ * (no users registered yet), which would otherwise fail with an
+ * opaque "user not found" 404 mid-prompt.
+ *
+ * If the publicserverinfo call itself fails (gateway down, wrong URL,
+ * old gateway version that doesn't have the endpoint), we fall back
+ * to the OIDC flow — this preserves backward compatibility with
+ * gateways predating the publicserverinfo endpoint and matches the
+ * existing failure mode users have today.
  */
 export async function login(): Promise<void> {
-  await performOAuthLogin();
+  const apiUrl = getApiUrl();
+  if (!apiUrl) {
+    error("API URL not configured. Run: hsh config set api-url <url>");
+    process.exit(1);
+  }
+
+  let serverInfo: Awaited<ReturnType<typeof getPublicServerInfo>>;
+  try {
+    serverInfo = await getPublicServerInfo(apiUrl);
+  } catch (err) {
+    // Don't fail the whole login — fall back to the OIDC flow which
+    // has its own error messaging for unreachable gateways. This
+    // preserves backward compat with gateways that don't expose
+    // `/api/publicserverinfo` (older versions) and avoids regressing
+    // users currently using OIDC successfully.
+    if (err instanceof ApiUnreachableError) {
+      warn(`Could not detect auth method (${err.reason}); trying OIDC flow.`);
+    } else {
+      warn(`Could not detect auth method (${formatApiError(err)}); trying OIDC flow.`);
+    }
+    await performOAuthLogin();
+    return;
+  }
+
+  if (serverInfo.authMethod === "local") {
+    if (serverInfo.setupRequired) {
+      reportSetupRequired(apiUrl);
+    }
+    await performLocalAuthLogin(apiUrl);
+    return;
+  }
+
+  if (serverInfo.authMethod === "oidc") {
+    await performOAuthLogin();
+    return;
+  }
+
+  if (serverInfo.authMethod === "saml") {
+    error("SAML authentication is not yet supported by hsh.");
+    error("Use the Hoop web UI to obtain a token, then write it to ~/.hsh/auth.json manually.");
+    process.exit(1);
+  }
+
+  error(`Unsupported auth method '${serverInfo.authMethod}' reported by the gateway.`);
+  process.exit(1);
 }
 
 export function logout(): void {
