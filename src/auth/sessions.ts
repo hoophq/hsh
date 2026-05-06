@@ -1,10 +1,11 @@
 import { join } from "path";
-import { readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from "fs";
+import { readFileSync, existsSync, readdirSync, unlinkSync } from "fs";
 import { getHshDir } from "../config/store.ts";
 import {
   clearAllEphemeralKubeconfigs,
   clearEphemeralKubeconfig,
 } from "../plugins/kubeconfig.ts";
+import { safeWriteJson } from "../util/safe-write.ts";
 import type { CredentialsResponse } from "../api/types.ts";
 
 const SESSIONS_DIR = "sessions";
@@ -52,8 +53,9 @@ export function getCachedCredentials(connectionName: string): CredentialsRespons
 }
 
 export function cacheCredentials(connectionName: string, credentials: CredentialsResponse): void {
-  const path = sessionPath(connectionName);
-  writeFileSync(path, JSON.stringify(credentials, null, 2) + "\n", { mode: 0o600 });
+  // Atomic write — two terminals racing to create credentials for the same
+  // connection must never leave a torn file behind.
+  safeWriteJson(sessionPath(connectionName), credentials, { mode: 0o600 });
 }
 
 export function clearCachedCredentials(connectionName: string): void {
