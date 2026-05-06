@@ -7,11 +7,13 @@ import { configCommand } from "./commands/config.ts";
 import { kubeconfigCommand } from "./commands/kubeconfig.ts";
 import { shellInitCommand } from "./commands/shell-init.ts";
 import { pluginCommand } from "./commands/plugin.ts";
+import { updateCommand } from "./commands/update.ts";
+import { VERSION } from "./version.ts";
 
 program
   .name("hsh")
   .description("Hoop Shell Plugins — Seamless access to infrastructure via shell integration")
-  .version("0.1.0");
+  .version(VERSION);
 
 program.addCommand(loginCommand);
 program.addCommand(logoutCommand);
@@ -20,5 +22,6 @@ program.addCommand(configCommand);
 program.addCommand(kubeconfigCommand);
 program.addCommand(shellInitCommand);
 program.addCommand(pluginCommand);
+program.addCommand(updateCommand);
 
 program.parse();
