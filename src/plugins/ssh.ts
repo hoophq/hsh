@@ -201,7 +201,10 @@ export const sshPlugin: Plugin = {
       title: "Hoop SSH Access",
       connection: connection.name,
       token: creds.password,
-      instructions: "Use the password above when prompted",
+      // Action-oriented copy: tell the user what to do, not what the
+      // token is for. Future ENG-360 will replace this entire flow with
+      // SSH_ASKPASS-based injection so no paste is required.
+      instructions: "Paste this token when ssh prompts for a password.",
     });
 
     const sshArgs = rewriteSshArgs(parsed, {
