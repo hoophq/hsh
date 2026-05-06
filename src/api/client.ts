@@ -1,3 +1,4 @@
+import { debug } from "../ui/log.ts";
 import type { Connection, CredentialsRequest, CredentialsResponse, ApiError } from "./types.ts";
 
 /**
@@ -98,10 +99,16 @@ export async function fetchWithTimeout(
 ): Promise<Response> {
   const { timeoutMs = DEFAULT_API_TIMEOUT_MS, ...rest } = options;
   const signal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
+  // Log the URL (no headers — they carry the bearer token).
+  debug("api", `fetch ${rest.method ?? "GET"} ${url} timeoutMs=${timeoutMs}`);
   try {
-    return await fetch(url, { ...rest, signal });
+    const res = await fetch(url, { ...rest, signal });
+    debug("api", `response ${res.status} ${url}`);
+    return res;
   } catch (err) {
-    throw classifyFetchError(err);
+    const classified = classifyFetchError(err);
+    debug("api", `fetch failed ${url} reason=${classified.reason}`);
+    throw classified;
   }
 }
 
