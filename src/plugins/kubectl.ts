@@ -11,6 +11,7 @@ import {
   sweepOrphanKubeconfigs,
   writeEphemeralKubeconfig,
 } from "./kubeconfig.ts";
+import { formatAmbiguityWarning, matchConnection } from "./match.ts";
 
 function getCurrentContext(args: string[]): string | null {
   for (let i = 0; i < args.length; i++) {
@@ -23,26 +24,6 @@ function getCurrentContext(args: string[]): string | null {
   });
 
   return result.exitCode === 0 ? result.stdout.toString().trim() || null : null;
-}
-
-function findK8sConnection(connections: Connection[], contextName: string): Connection | null {
-  const exact = connections.find((c) => c.name === contextName);
-  if (exact) return exact;
-
-  const byCluster = connections.find((c) => c.access_schema?.cluster_name === contextName);
-  if (byCluster) return byCluster;
-
-  const byTag = connections.find(
-    (c) => c.tags?.context === contextName || c.tags?.cluster === contextName
-  );
-  if (byTag) return byTag;
-
-  const partial = connections.find(
-    (c) => c.name.includes(contextName) || contextName.includes(c.name)
-  );
-  if (partial) return partial;
-
-  return null;
 }
 
 function isLocalAddress(host: string): boolean {
@@ -137,12 +118,17 @@ export const kubectlPlugin: Plugin = {
       }
     }
 
-    const connection = findK8sConnection(connections, contextName);
-    if (!connection) {
+    const result = matchConnection(connections, contextName, "kubectl");
+    if (!result.match) {
       spin.stop();
       dim(`No Hoop connection found for context: ${contextName}. Running kubectl directly.`);
       return execKubectl(args);
     }
+    if (result.ambiguous) {
+      spin.stop();
+      warn(formatAmbiguityWarning(contextName, result));
+    }
+    const connection = result.match;
 
     spin.text = `Connecting to ${connection.name} via Hoop...`;
 
