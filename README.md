@@ -268,6 +268,37 @@ src/
     └── output.ts         Terminal formatting
 ```
 
+## Troubleshooting
+
+When something doesn't behave the way you expect — `hsh` falls through to native ssh/kubectl when you wanted it to route through Hoop, or vice versa, or the wrong connection gets picked — set the `HSH_DEBUG` environment variable to see exactly what `hsh` decided.
+
+```bash
+HSH_DEBUG=1 ssh production-db 2>debug.log
+HSH_DEBUG=1 kubectl get pods 2>debug.log
+```
+
+Output goes to **stderr only**, so it never pollutes the program's stdout. Format is grep-friendly:
+
+```
+[hsh debug] ssh: argv parsed {"argc":1,"host":"production-db","user":null,"port":null}
+[hsh debug] api: fetch GET https://api.hoop.dev/api/connections timeoutMs=3000
+[hsh debug] api: response 200 https://api.hoop.dev/api/connections
+[hsh debug] match: ssh {"target":"production-db","level":"exact","winner":"production-db","candidates":["production-db"],"ambiguous":false}
+[hsh debug] cache: ssh miss name=production-db
+[hsh debug] api: fetch POST https://api.hoop.dev/api/connections/production-db/credentials timeoutMs=3000
+[hsh debug] api: response 200 ...
+```
+
+`HSH_DEBUG` accepts `1`, `true`, `yes`, or `on` (case-insensitive). Anything else (including unset) keeps the logger silent — there is no runtime cost when the flag is off.
+
+**Security**: tokens, passwords, and refresh tokens are never written through this logger by design. The codebase has a regression test (`tests/log.test.ts`) that fails CI if a `debug(...)` call ever passes a credential.
+
+Common things to check from the debug output:
+
+* **`match: level=null`** — your target didn't match any Hoop connection at any priority level (exact, schema-field, tag). See [`docs/connection-matching.md`](docs/connection-matching.md) for the rules.
+* **`api: fetch failed reason=timeout`** — gateway is unreachable. `hsh` falls open to native ssh/kubectl after ~3s. Run `hsh status` to confirm the API URL.
+* **`cache: hit expire_at=…`** — `hsh` reused a cached credential. To force a fresh issue, run `hsh logout` (clears every cache file) or wait for the listed expiry.
+
 ## License
 
 MIT

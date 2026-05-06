@@ -6,6 +6,7 @@ import { createClient, ApiUnreachableError, AuthExpiredError } from "../api/clie
 import { getCachedCredentials, cacheCredentials, clearCachedCredentials } from "../auth/sessions.ts";
 import type { Connection, SSHCredentials, CredentialsResponse } from "../api/types.ts";
 import { spinner, tokenBox, error, info, warn, dim } from "../ui/output.ts";
+import { debug } from "../ui/log.ts";
 import { spawn } from "child_process";
 import { parseSshArgs, rewriteSshArgs } from "./ssh-args.ts";
 import { formatAmbiguityWarning, matchConnection } from "./match.ts";
@@ -36,8 +37,10 @@ async function getCredentials(
   // Check cache first
   const cached = getCachedCredentials(connectionName);
   if (cached?.connection_credentials) {
+    debug("cache", `ssh hit name=${connectionName} expire_at=${cached.expire_at}`);
     return { resp: cached, creds: cached.connection_credentials as SSHCredentials };
   }
+  debug("cache", `ssh miss name=${connectionName}`);
 
   const token = await ensureAuthenticated();
   const client = createClient(apiUrl, token);
@@ -50,6 +53,7 @@ async function getCredentials(
     return { resp, creds: resp.connection_credentials as SSHCredentials };
   } catch (err) {
     if (err instanceof AuthExpiredError && !retried) {
+      debug("auth", `ssh credential request rejected as expired; forcing re-auth name=${connectionName}`);
       // Token expired server-side — force re-auth and retry
       clearCachedCredentials(connectionName);
       await forceReauthenticate();
@@ -67,10 +71,22 @@ export const sshPlugin: Plugin = {
   async run(args: string[]): Promise<void> {
     const parsed = parseSshArgs(args);
     const hostname = parsed.host;
-    if (!hostname) return passthrough(args);
+    debug("ssh", `argv parsed`, {
+      argc: args.length,
+      host: hostname,
+      user: parsed.user,
+      port: parsed.port,
+    });
+    if (!hostname) {
+      debug("ssh", "no hostname in argv → passthrough");
+      return passthrough(args);
+    }
 
     const apiUrl = getApiUrl();
-    if (!apiUrl || !isAuthenticated()) return passthrough(args);
+    if (!apiUrl || !isAuthenticated()) {
+      debug("ssh", `passthrough: apiUrl=${apiUrl ?? "<unset>"} authenticated=${isAuthenticated()}`);
+      return passthrough(args);
+    }
 
     // Look up connection — on AuthExpired, re-auth and retry
     let token = await ensureAuthenticated();
@@ -101,6 +117,13 @@ export const sshPlugin: Plugin = {
     }
 
     const result = matchConnection(connections, hostname, "ssh");
+    debug("match", "ssh", {
+      target: hostname,
+      level: result.level,
+      winner: result.match?.name ?? null,
+      candidates: result.candidates.map((c) => c.name),
+      ambiguous: result.ambiguous,
+    });
     if (!result.match) return passthrough(args);
     if (result.ambiguous) warn(formatAmbiguityWarning(hostname, result));
     const connection = result.match;

@@ -5,6 +5,7 @@ import { createClient, ApiUnreachableError, AuthExpiredError } from "../api/clie
 import { getCachedCredentials, cacheCredentials, clearCachedCredentials } from "../auth/sessions.ts";
 import type { Connection, HttpProxyCredentials } from "../api/types.ts";
 import { spinner, error, info, warn, dim } from "../ui/output.ts";
+import { debug } from "../ui/log.ts";
 import { spawn } from "child_process";
 import {
   buildKubeconfigEnv,
@@ -49,8 +50,10 @@ async function getK8sCredentials(
 ): Promise<{ resp: { has_review: boolean; review_id?: string; connection_credentials?: unknown }; creds: HttpProxyCredentials }> {
   const cached = getCachedCredentials(connectionName);
   if (cached?.connection_credentials) {
+    debug("cache", `kubectl hit name=${connectionName} expire_at=${cached.expire_at}`);
     return { resp: cached, creds: cached.connection_credentials as HttpProxyCredentials };
   }
+  debug("cache", `kubectl miss name=${connectionName}`);
 
   const token = await ensureAuthenticated();
   const client = createClient(apiUrl, token);
@@ -63,6 +66,7 @@ async function getK8sCredentials(
     return { resp, creds: resp.connection_credentials as HttpProxyCredentials };
   } catch (err) {
     if (err instanceof AuthExpiredError && !retried) {
+      debug("auth", `kubectl credential request rejected as expired; forcing re-auth name=${connectionName}`);
       clearCachedCredentials(connectionName);
       await forceReauthenticate();
       return getK8sCredentials(connectionName, apiUrl, true);
@@ -78,13 +82,17 @@ export const kubectlPlugin: Plugin = {
 
   async run(args: string[]): Promise<void> {
     const contextName = getCurrentContext(args);
+    debug("kubectl", `context detected: ${contextName ?? "<none>"}`);
     if (!contextName) {
       warn("No kubectl context detected. Running kubectl directly.");
       return execKubectl(args);
     }
 
     const apiUrl = getApiUrl();
-    if (!apiUrl) return execKubectl(args);
+    if (!apiUrl) {
+      debug("kubectl", "passthrough: api-url not configured");
+      return execKubectl(args);
+    }
 
     let token = await ensureAuthenticated();
     let client = createClient(apiUrl, token);
@@ -119,6 +127,13 @@ export const kubectlPlugin: Plugin = {
     }
 
     const result = matchConnection(connections, contextName, "kubectl");
+    debug("match", "kubectl", {
+      target: contextName,
+      level: result.level,
+      winner: result.match?.name ?? null,
+      candidates: result.candidates.map((c) => c.name),
+      ambiguous: result.ambiguous,
+    });
     if (!result.match) {
       spin.stop();
       dim(`No Hoop connection found for context: ${contextName}. Running kubectl directly.`);
