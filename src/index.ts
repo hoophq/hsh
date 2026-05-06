@@ -4,6 +4,7 @@ import { loginCommand } from "./commands/login.ts";
 import { logoutCommand } from "./commands/logout.ts";
 import { statusCommand } from "./commands/status.ts";
 import { configCommand } from "./commands/config.ts";
+import { kubeconfigCommand } from "./commands/kubeconfig.ts";
 import { shellInitCommand } from "./commands/shell-init.ts";
 import { pluginCommand } from "./commands/plugin.ts";
 
@@ -16,6 +17,7 @@ program.addCommand(loginCommand);
 program.addCommand(logoutCommand);
 program.addCommand(statusCommand);
 program.addCommand(configCommand);
+program.addCommand(kubeconfigCommand);
 program.addCommand(shellInitCommand);
 program.addCommand(pluginCommand);
 
