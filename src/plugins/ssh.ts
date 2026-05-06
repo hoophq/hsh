@@ -16,6 +16,15 @@ import { spawn } from "child_process";
 import { parseSshArgs, rewriteSshArgs } from "./ssh-args.ts";
 import { formatAmbiguityWarning, matchConnection } from "./match.ts";
 import { ExitCodes } from "./exit-codes.ts";
+import {
+  cleanupAskpassPair,
+  isAskpassEnabled,
+  supportsAskpassRequireForce,
+  sweepOrphanAskpass,
+  withAskpassEnv,
+  writeAskpassPair,
+  type AskpassPair,
+} from "../auth/askpass.ts";
 
 function isLocalAddress(host: string): boolean {
   return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
@@ -229,31 +238,130 @@ async function runInner(args: string[]): Promise<void> {
       ? new URL(apiUrl).hostname
       : creds.hostname;
 
-    tokenBox({
-      title: "Hoop SSH Access",
-      connection: connection.name,
-      token: creds.password,
-      // Action-oriented copy: tell the user what to do, not what the
-      // token is for. Future ENG-360 will replace this entire flow with
-      // SSH_ASKPASS-based injection so no paste is required.
-      instructions: "Paste this token when ssh prompts for a password.",
-    });
-
     const sshArgs = rewriteSshArgs(parsed, {
       newUser: creds.username,
       newHost: gatewayHost,
       newPort: creds.port,
     });
 
-    info(`Connecting: ssh ${sshArgs.join(" ")}`);
-    console.log();
+    // ENG-360: try askpass-based auto-injection. Falls back to the
+    // copy/paste UX (legacy `tokenBox`) when:
+    //   - HSH_SSH_ASKPASS=0/off/false/no  (per-invocation kill switch)
+    //   - OpenSSH < 8.4 doesn't honor SSH_ASKPASS_REQUIRE=force
+    //   - ssh isn't installed (ENOENT from `ssh -V`) — though if we
+    //     made it this far we'd already have failed somewhere upstream
+    //
+    // Sweep first so a crashed earlier `hsh ssh` doesn't leak files
+    // forever. Cheap (5-min TTL on a tiny per-user dir).
+    sweepOrphanAskpass();
 
-    const child = spawn("ssh", sshArgs, { stdio: "inherit" });
-    // Pass ssh's exit code through verbatim so scripts see what they'd see
-    // running ssh directly (1 generic, 124 timeout, 130 SIGINT, 255 disconnect).
-    child.on("exit", (code) => process.exit(code ?? ExitCodes.Success));
-    child.on("error", (err) => {
-      error(`Failed to start ssh: ${err.message}`);
-      process.exit(ExitCodes.GenericError);
+    const useAskpass = isAskpassEnabled() && supportsAskpassRequireForce();
+    debug("ssh", `askpass useAskpass=${useAskpass} enabled=${isAskpassEnabled()}`);
+
+    if (useAskpass) {
+      runWithAskpass({
+        spin,
+        connectionName: connection.name,
+        sshArgs,
+        token: creds.password,
+      });
+      return;
+    }
+
+    runWithCopyPaste({
+      spin,
+      connectionName: connection.name,
+      sshArgs,
+      token: creds.password,
     });
+}
+
+interface RunArgs {
+  spin: ReturnType<typeof spinner>;
+  connectionName: string;
+  sshArgs: string[];
+  token: string;
+}
+
+/**
+ * ENG-360 path: write askpass pair, spawn ssh with SSH_ASKPASS env vars,
+ * always cleanup in finally (success OR failure OR exception).
+ *
+ * Note: we exit the process via `process.exit(code)` inside the child's
+ * exit handler, so the cleanup happens BEFORE that exit() call. We
+ * cannot rely on `finally` outside the spawn — it would never run
+ * because process.exit short-circuits anything else.
+ */
+function runWithAskpass(args: RunArgs): void {
+  let pair: AskpassPair;
+  try {
+    pair = writeAskpassPair(args.token);
+  } catch (err) {
+    // Disk full, permission denied on ~/.hsh/askpass/, etc. Fall back
+    // to copy/paste rather than failing the whole `hsh ssh` invocation.
+    warn(
+      `askpass setup failed (${err instanceof Error ? err.message : String(err)}); ` +
+        "falling back to copy/paste.",
+    );
+    runWithCopyPaste(args);
+    return;
+  }
+
+  info(`Connecting: ssh ${args.sshArgs.join(" ")}`);
+  // Soft hint that the user shouldn't paste anything; quiet enough to
+  // not be noisy after the novelty wears off.
+  dim("(token will be injected automatically)");
+  console.log();
+
+  const child = spawn("ssh", args.sshArgs, {
+    stdio: "inherit",
+    env: withAskpassEnv(process.env, pair.shimPath),
+  });
+
+  // Cleanup on EITHER exit OR error path. We don't want to leave
+  // tempfiles on disk, even though the sweeper would catch them in
+  // 5 minutes — that's the failsafe, not the primary mechanism.
+  child.on("exit", (code) => {
+    cleanupAskpassPair(pair);
+    process.exit(code ?? ExitCodes.Success);
+  });
+  child.on("error", (err) => {
+    cleanupAskpassPair(pair);
+    error(`Failed to start ssh: ${err.message}`);
+    process.exit(ExitCodes.GenericError);
+  });
+}
+
+/**
+ * Legacy path (pre-ENG-360 UX). Kept for users on OpenSSH < 8.4 and as
+ * the kill switch when `HSH_SSH_ASKPASS=0`.
+ *
+ * NOTE: a future iteration could shorten the box and switch the copy
+ * to "Press Enter then paste" once we're confident the askpass path
+ * is the default UX. Until then, the legacy box is verbatim what
+ * users have been seeing for months.
+ */
+function runWithCopyPaste(args: RunArgs): void {
+  tokenBox({
+    title: "Hoop SSH Access",
+    connection: args.connectionName,
+    token: args.token,
+    // Action-oriented copy: tells the user what to DO, not what the
+    // token IS. Updated as part of ENG-360 — for users who land on
+    // this path (OpenSSH < 8.4 or HSH_SSH_ASKPASS=0), the new copy
+    // matches what the spike doc recommended.
+    instructions: "Press Enter at the password prompt, then paste this token.",
+  });
+
+  info(`Connecting: ssh ${args.sshArgs.join(" ")}`);
+  console.log();
+
+  const child = spawn("ssh", args.sshArgs, { stdio: "inherit" });
+  // Pass ssh's exit code through verbatim so scripts see what they'd see
+  // running ssh directly (1 generic, 124 timeout, 130 SIGINT, 255 disconnect).
+  child.on("exit", (code) => process.exit(code ?? ExitCodes.Success));
+  child.on("error", (err) => {
+    error(`Failed to start ssh: ${err.message}`);
+    process.exit(ExitCodes.GenericError);
+  });
 }

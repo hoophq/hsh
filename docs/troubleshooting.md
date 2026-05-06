@@ -39,6 +39,35 @@ To see which source produced your context, set `HSH_DEBUG=1`:
 [hsh debug] kubectl: context detection {"context":"prod-eks","source":"kubeconfig-env","fileConsulted":"/home/u/.kube/work-config"}
 ```
 
+## SSH password injection
+
+Since [ENG-360](https://linear.app/hoophq/issue/ENG-360), `hsh ssh <connection>` injects the per-session token automatically — you no longer paste it at the password prompt. The mechanism is OpenSSH's standard `SSH_ASKPASS_REQUIRE=force` (requires OpenSSH ≥ 8.4, released Sept 2020).
+
+A tiny shim script is written under `~/.hsh/askpass/<pid>-<rand>.sh` (mode 0700) alongside a token file (mode 0600). The shim's path is passed to ssh via `SSH_ASKPASS`; the token itself **never** appears in the spawned ssh's environment or argv. Both files are deleted as soon as ssh exits.
+
+If you see leftover files in `~/.hsh/askpass/`, that's a crash recovery scenario — the sweeper runs at the start of every `hsh ssh` invocation and removes anything older than 5 minutes. Manual cleanup: `rm ~/.hsh/askpass/*`.
+
+### Disabling per-invocation
+
+```bash
+HSH_SSH_ASKPASS=0 hsh ssh some-host        # just this one
+```
+
+Recognised "off" values (case-insensitive): `0`, `off`, `false`, `no`. Anything else keeps the askpass path enabled.
+
+When askpass is disabled, the legacy copy/paste UX runs — a token is printed in a box, you press Enter at the password prompt, then paste. The behavior also degrades automatically:
+- if `ssh -V` reports OpenSSH < 8.4 (some macOS 11 / very old Linux),
+- if writing under `~/.hsh/askpass/` fails (disk full / permission glitch),
+- or if `ssh` is missing entirely (`ENOENT`).
+
+In any of those cases `hsh` logs a one-line `[hsh debug] askpass: ...` reason (with `HSH_DEBUG=1`) and falls back. The user-visible UX is identical to what shipped before ENG-360.
+
+### "ssh is asking me for a password even though askpass is enabled"
+
+Most common cause: your local OpenSSH is < 8.4. Check with `ssh -V`. If the version is fine, set `HSH_DEBUG=1` and look for `[hsh debug] askpass: ...` — the parsed-version + supported flag will be printed there. If `supported=true` but the prompt still appears, file an issue with that debug line attached.
+
+A subtle gotcha: some `ssh_config` Match blocks set `KbdInteractiveAuthentication=yes` for specific hosts; if the gateway sends the password challenge as keyboard-interactive instead of plain `password`, askpass isn't invoked. Force the auth method with `-o PreferredAuthentications=password` to confirm.
+
 ## Common questions
 
 ### \"hsh ran the wrong connection\"
