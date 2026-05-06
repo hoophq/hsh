@@ -257,7 +257,7 @@ export class HoopApiClient {
       `/api/connections/${encodeURIComponent(connectionName)}/credentials`,
       {
         method: "POST",
-        body: JSON.stringify({ access_duration_sec: accessDurationSec } satisfies CredentialsRequest),
+        body: JSON.stringify({ access_duration_seconds: accessDurationSec } satisfies CredentialsRequest),
       }
     );
   }
