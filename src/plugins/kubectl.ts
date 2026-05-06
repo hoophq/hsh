@@ -1,7 +1,7 @@
 import type { Plugin } from "./base.ts";
 import { ensureAuthenticated, forceReauthenticate } from "../auth/manager.ts";
 import { getApiUrl } from "../config/store.ts";
-import { createClient, AuthExpiredError } from "../api/client.ts";
+import { createClient, ApiUnreachableError, AuthExpiredError } from "../api/client.ts";
 import { getCachedCredentials, cacheCredentials, clearCachedCredentials } from "../auth/sessions.ts";
 import type { Connection, HttpProxyCredentials } from "../api/types.ts";
 import { spinner, error, info, warn, dim } from "../ui/output.ts";
@@ -114,13 +114,21 @@ export const kubectlPlugin: Plugin = {
     try {
       connections = await client.listConnections();
     } catch (err) {
+      if (err instanceof ApiUnreachableError) {
+        spin.stop();
+        warn(`Hoop API unreachable (${err.reason}); running kubectl directly`);
+        return execKubectl(args);
+      }
       if (err instanceof AuthExpiredError) {
         token = await forceReauthenticate();
         client = createClient(apiUrl, token);
         try {
           connections = await client.listConnections();
-        } catch {
+        } catch (retryErr) {
           spin.stop();
+          if (retryErr instanceof ApiUnreachableError) {
+            warn(`Hoop API unreachable (${retryErr.reason}); running kubectl directly`);
+          }
           return execKubectl(args);
         }
       } else {
@@ -151,6 +159,11 @@ export const kubectlPlugin: Plugin = {
       creds = result.creds;
       if (!creds?.hostname) throw new Error("No Kubernetes credentials returned");
     } catch (err: unknown) {
+      if (err instanceof ApiUnreachableError) {
+        spin.stop();
+        warn(`Hoop API unreachable (${err.reason}); running kubectl directly`);
+        return execKubectl(args);
+      }
       spin.fail("Failed to create credentials");
       const msg = err && typeof err === "object" && "message" in err ? (err as { message: string }).message : String(err);
       error(msg);

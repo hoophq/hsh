@@ -2,10 +2,10 @@ import type { Plugin } from "./base.ts";
 import { ensureAuthenticated, forceReauthenticate } from "../auth/manager.ts";
 import { getApiUrl } from "../config/store.ts";
 import { isAuthenticated } from "../auth/store.ts";
-import { createClient, AuthExpiredError } from "../api/client.ts";
+import { createClient, ApiUnreachableError, AuthExpiredError } from "../api/client.ts";
 import { getCachedCredentials, cacheCredentials, clearCachedCredentials } from "../auth/sessions.ts";
 import type { Connection, SSHCredentials, CredentialsResponse } from "../api/types.ts";
-import { spinner, tokenBox, error, info, dim } from "../ui/output.ts";
+import { spinner, tokenBox, error, info, warn, dim } from "../ui/output.ts";
 import { spawn } from "child_process";
 import { parseSshArgs, rewriteSshArgs } from "./ssh-args.ts";
 
@@ -101,12 +101,19 @@ export const sshPlugin: Plugin = {
     try {
       connections = await client.listConnections();
     } catch (err) {
+      if (err instanceof ApiUnreachableError) {
+        warn(`Hoop API unreachable (${err.reason}); running ssh directly`);
+        return passthrough(args);
+      }
       if (err instanceof AuthExpiredError) {
         token = await forceReauthenticate();
         client = createClient(apiUrl, token);
         try {
           connections = await client.listConnections();
-        } catch {
+        } catch (retryErr) {
+          if (retryErr instanceof ApiUnreachableError) {
+            warn(`Hoop API unreachable (${retryErr.reason}); running ssh directly`);
+          }
           return passthrough(args);
         }
       } else {
@@ -135,6 +142,11 @@ export const sshPlugin: Plugin = {
         throw new Error("No SSH credentials returned");
       }
     } catch (err: unknown) {
+      if (err instanceof ApiUnreachableError) {
+        spin.stop();
+        warn(`Hoop API unreachable (${err.reason}); running ssh directly`);
+        return passthrough(args);
+      }
       spin.fail("Failed to create credentials");
       const msg = err && typeof err === "object" && "message" in err ? (err as { message: string }).message : String(err);
       error(msg);
