@@ -22,7 +22,14 @@ export interface AccessSchema {
 }
 
 export interface CredentialsRequest {
-  access_duration_sec: number;
+  // Field name MUST match the gateway's openapi schema
+  // (gateway/api/openapi/types.go: ConnectionCredentialsRequest):
+  //   AccessDurationSec int `json:"access_duration_seconds"`
+  // Sending the short form `access_duration_sec` decodes to 0 server-side
+  // (Go's json.Unmarshal silently ignores unknown fields), causing the
+  // gateway to issue credentials with `expire_at = now()` — i.e. born
+  // already expired. See ENG-361 for the live reproduction.
+  access_duration_seconds: number;
 }
 
 export interface CredentialsResponse {
