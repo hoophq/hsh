@@ -13,6 +13,7 @@ import {
   writeEphemeralKubeconfig,
 } from "./kubeconfig.ts";
 import { formatAmbiguityWarning, matchConnection } from "./match.ts";
+import { ExitCodes } from "./exit-codes.ts";
 
 function getCurrentContext(args: string[]): string | null {
   for (let i = 0; i < args.length; i++) {
@@ -35,10 +36,13 @@ function execKubectl(args: string[], extraEnv?: Record<string, string>): Promise
   return new Promise(() => {
     const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
     const child = spawn("kubectl", args, { stdio: "inherit", env });
-    child.on("exit", (code) => process.exit(code ?? 0));
+    // Pass kubectl's exit code through verbatim so $? reflects the underlying
+    // tool's status (kubectl returns 1 on most errors, but tools wrapping it —
+    // helm, kustomize, k9s — depend on the exact code).
+    child.on("exit", (code) => process.exit(code ?? ExitCodes.Success));
     child.on("error", (err) => {
       error(`Failed to start kubectl: ${err.message}`);
-      process.exit(1);
+      process.exit(ExitCodes.GenericError);
     });
   });
 }
@@ -154,7 +158,9 @@ export const kubectlPlugin: Plugin = {
       if (result.resp.has_review && !result.resp.connection_credentials) {
         spin.warn("This connection requires approval");
         info(`Review ID: ${result.resp.review_id}`);
-        process.exit(0);
+        // EX_TEMPFAIL — credentials weren't issued; user must approve.
+        // Scripts should treat this as 'try again later', NOT as success.
+        process.exit(ExitCodes.ReviewPending);
       }
 
       creds = result.creds;
@@ -168,7 +174,7 @@ export const kubectlPlugin: Plugin = {
       spin.fail("Failed to create credentials");
       const msg = err && typeof err === "object" && "message" in err ? (err as { message: string }).message : String(err);
       error(msg);
-      process.exit(1);
+      process.exit(ExitCodes.GenericError);
     }
 
     const cached = getCachedCredentials(connection.name);

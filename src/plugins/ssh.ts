@@ -10,6 +10,7 @@ import { debug } from "../ui/log.ts";
 import { spawn } from "child_process";
 import { parseSshArgs, rewriteSshArgs } from "./ssh-args.ts";
 import { formatAmbiguityWarning, matchConnection } from "./match.ts";
+import { ExitCodes } from "./exit-codes.ts";
 
 function isLocalAddress(host: string): boolean {
   return host === "0.0.0.0" || host === "127.0.0.1" || host === "localhost" || host === "::";
@@ -39,10 +40,12 @@ export function buildPassthroughSpawn(args: string[]): {
 function passthrough(args: string[]): void {
   const desc = buildPassthroughSpawn(args);
   const child = spawn(desc.cmd, desc.args, desc.options);
-  child.on("exit", (code) => process.exit(code ?? 0));
+  // Pass the child's exit code through verbatim so $? in the user's shell
+  // reflects ssh's exit status (1, 124 timeout, 130 SIGINT, 255 disconnect, …).
+  child.on("exit", (code) => process.exit(code ?? ExitCodes.Success));
   child.on("error", (err) => {
     error(`Failed to start ssh: ${err.message}`);
-    process.exit(1);
+    process.exit(ExitCodes.GenericError);
   });
 }
 
@@ -160,7 +163,9 @@ export const sshPlugin: Plugin = {
         spin.warn("This connection requires approval");
         info(`Review ID: ${result.resp.review_id}`);
         info("Waiting for approval in the Hoop web UI...");
-        process.exit(0);
+        // EX_TEMPFAIL — credentials weren't issued, the user must approve.
+        // Scripts should treat this as 'try again later', NOT as success.
+        process.exit(ExitCodes.ReviewPending);
       }
 
       creds = result.creds;
@@ -176,7 +181,7 @@ export const sshPlugin: Plugin = {
       spin.fail("Failed to create credentials");
       const msg = err && typeof err === "object" && "message" in err ? (err as { message: string }).message : String(err);
       error(msg);
-      process.exit(1);
+      process.exit(ExitCodes.GenericError);
     }
 
     const cached = getCachedCredentials(connection.name);
@@ -209,10 +214,12 @@ export const sshPlugin: Plugin = {
     console.log();
 
     const child = spawn("ssh", sshArgs, { stdio: "inherit" });
-    child.on("exit", (code) => process.exit(code ?? 0));
+    // Pass ssh's exit code through verbatim so scripts see what they'd see
+    // running ssh directly (1 generic, 124 timeout, 130 SIGINT, 255 disconnect).
+    child.on("exit", (code) => process.exit(code ?? ExitCodes.Success));
     child.on("error", (err) => {
       error(`Failed to start ssh: ${err.message}`);
-      process.exit(1);
+      process.exit(ExitCodes.GenericError);
     });
   },
 };
