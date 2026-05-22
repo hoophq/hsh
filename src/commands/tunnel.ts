@@ -21,9 +21,10 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
+import open from "open";
 import { getAuthData, isAuthenticated } from "../auth/store.ts";
 import { getApiUrl } from "../config/store.ts";
-import { error, info, keyValue, success, warn } from "../ui/output.ts";
+import { error, info, keyValue, spinner, success, warn } from "../ui/output.ts";
 import { debug } from "../ui/log.ts";
 import {
   TunnelApiError,
@@ -107,6 +108,203 @@ const connectionsSub = new Command("connections")
       process.exitCode = 1;
     }
   });
+
+// ----------------------------------------------------------------------
+// hsh tunnel login / logout
+// ----------------------------------------------------------------------
+
+const loginSub = new Command("login")
+  .description("Authenticate the daemon with the hoop gateway (browser flow)")
+  .option(
+    "--no-browser",
+    "Print the login URL instead of opening the browser",
+    false
+  )
+  .option(
+    "--timeout <seconds>",
+    "Cap how long to wait for the browser callback",
+    parseTimeout,
+    180
+  )
+  .action(async (opts: { browser: boolean; timeout: number }) => {
+    let client: TunnelClient;
+    try {
+      client = TunnelClient.connect();
+    } catch (err) {
+      renderUnavailable(err);
+      process.exitCode = 1;
+      return;
+    }
+
+    // Pre-flight: if the daemon doesn't have an api_url set, calling
+    // /v1/login/start would fail with a fairly opaque message. Tell
+    // the user explicitly so they know which knob to turn.
+    try {
+      const cfg = await client.config();
+      if (!cfg.api_url) {
+        error("Daemon has no api_url configured.");
+        info("Set it first: hsh tunnel config set api-url <url>");
+        process.exitCode = 1;
+        return;
+      }
+    } catch (err) {
+      renderApiError(err);
+      process.exitCode = 1;
+      return;
+    }
+
+    // Kick off the daemon-owned OAuth.
+    let started;
+    try {
+      started = await client.loginStart();
+    } catch (err) {
+      renderApiError(err);
+      process.exitCode = 1;
+      return;
+    }
+
+    info(`Opening browser to authenticate at the hoop gateway...`);
+    if (opts.browser) {
+      try {
+        await open(started.browser_url);
+      } catch {
+        warn("Could not open the browser automatically.");
+      }
+    }
+    info(`If the browser does not open, visit:\n  ${started.browser_url}\n`);
+
+    // Poll until the daemon transitions to done/error or we hit the
+    // user-supplied timeout. The daemon enforces its own 3-minute
+    // timeout independently; our client timeout exists to bound the
+    // foreground command in case the daemon is wedged.
+    const spin = spinner("Waiting for the browser callback...");
+    const deadline = Date.now() + opts.timeout * 1000;
+    try {
+      while (Date.now() < deadline) {
+        const poll = await client.loginPoll(started.state);
+        if (poll.status === "done") {
+          spin.succeed("Authenticated. Daemon token persisted.");
+          info("Restart the daemon to bring up the tunnel:");
+          info("  hsh tunnel stop  &&  hsh tunnel start  (or restart the system service)");
+          return;
+        }
+        if (poll.status === "error") {
+          spin.fail(`Login failed: ${poll.error ?? "unknown error"}`);
+          process.exitCode = 1;
+          return;
+        }
+        // pending — wait and retry
+        await sleep(1000);
+      }
+      spin.fail(`Login did not complete within ${opts.timeout}s`);
+      process.exitCode = 1;
+    } catch (err) {
+      spin.stop();
+      renderApiError(err);
+      process.exitCode = 1;
+    }
+  });
+
+const logoutSub = new Command("logout")
+  .description("Clear the daemon's stored gateway token")
+  .action(async () => {
+    let client: TunnelClient;
+    try {
+      client = TunnelClient.connect();
+    } catch (err) {
+      renderUnavailable(err);
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      await client.logout();
+      success("Daemon token cleared.");
+      info("Restart the daemon to take the tunnel down.");
+    } catch (err) {
+      renderApiError(err);
+      process.exitCode = 1;
+    }
+  });
+
+// ----------------------------------------------------------------------
+// hsh tunnel config get / set
+// ----------------------------------------------------------------------
+
+const configGetSub = new Command("get")
+  .description("Show the daemon's current configuration")
+  .action(async () => {
+    let client: TunnelClient;
+    try {
+      client = TunnelClient.connect();
+    } catch (err) {
+      renderUnavailable(err);
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const cfg = await client.config();
+      keyValue({
+        "API URL": cfg.api_url || chalk.dim("(not set)"),
+        "gRPC URL": cfg.grpc_url || chalk.dim("(auto-discovered)"),
+        "Log level": cfg.log_level,
+      });
+    } catch (err) {
+      renderApiError(err);
+      process.exitCode = 1;
+    }
+  });
+
+// Set a single config key. Mirrors `hsh config set` style: kebab-case
+// keys map to snake_case wire field names.
+const configSetSub = new Command("set")
+  .description("Update a daemon configuration field (api-url, grpc-url, log-level)")
+  .argument("<key>", "Config key (api-url | grpc-url | log-level)")
+  .argument("<value>", "New value")
+  .action(async (key: string, value: string) => {
+    let client: TunnelClient;
+    try {
+      client = TunnelClient.connect();
+    } catch (err) {
+      renderUnavailable(err);
+      process.exitCode = 1;
+      return;
+    }
+
+    const req: Record<string, string> = {};
+    switch (key.toLowerCase()) {
+      case "api-url":
+      case "api_url":
+        req.api_url = value.replace(/\/+$/, "");
+        break;
+      case "grpc-url":
+      case "grpc_url":
+        req.grpc_url = value;
+        break;
+      case "log-level":
+      case "log_level":
+        req.log_level = value;
+        break;
+      default:
+        error(`Unknown config key: ${key}`);
+        info("Known keys: api-url, grpc-url, log-level");
+        process.exitCode = 1;
+        return;
+    }
+
+    try {
+      await client.updateConfig(req);
+      success(`Set ${key} = ${value}`);
+      info("Restart the daemon for the change to take effect.");
+    } catch (err) {
+      renderApiError(err);
+      process.exitCode = 1;
+    }
+  });
+
+const configSub = new Command("config")
+  .description("Manage daemon configuration (api-url, grpc-url, log-level)")
+  .addCommand(configGetSub)
+  .addCommand(configSetSub);
 
 // ----------------------------------------------------------------------
 // hsh tunnel start  /  hsh tunnel stop
@@ -332,6 +530,32 @@ export const tunnelCommand = new Command("tunnel")
   .description("Control the hsh-tunneld daemon (local tunnel for *.hoop hosts)")
   .addCommand(statusSub)
   .addCommand(connectionsSub)
+  .addCommand(loginSub)
+  .addCommand(logoutSub)
+  .addCommand(configSub)
   .addCommand(startSub)
   .addCommand(stopSub)
   .addCommand(daemonPathSub);
+
+/**
+ * Promise-friendly setTimeout. Used by the login-poll loop so we don't
+ * busy-spin against the daemon while waiting for the user's browser
+ * callback.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Coerce the `--timeout` flag (which commander passes as a string) into
+ * a positive integer. We accept any value parseable as a number and
+ * fall back to the previous flag value on garbage, which matches
+ * commander's documented coercer signature.
+ */
+function parseTimeout(value: string, _previous: number): number {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`invalid --timeout value: ${value} (want a positive integer)`);
+  }
+  return n;
+}
