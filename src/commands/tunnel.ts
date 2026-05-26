@@ -237,9 +237,13 @@ async function runOidcLogin(
     while (Date.now() < deadline) {
       const poll = await client.loginPoll(started.state);
       if (poll.status === "done") {
-        spin.succeed("Authenticated. Daemon token persisted.");
-        info("Restart the daemon to bring up the tunnel:");
-        info("  hsh tunnel stop  &&  hsh tunnel start  (or restart the system service)");
+        spin.succeed("Authenticated. Tunnel coming up...");
+        // The daemon hot-starts the netstack inside its OnSuccess
+        // callback, so by the time we observe "done" the tunnel is
+        // either Up or has reported a bring-up error via lastError.
+        // Surface either outcome via a follow-up status call rather
+        // than asking the user to run `hsh tunnel status` themselves.
+        await reportPostLoginStatus(client);
         return;
       }
       if (poll.status === "error") {
@@ -320,9 +324,8 @@ async function runLocalAuthLogin(
   const spin = spinner("Authenticating...");
   try {
     await client.loginLocal({ email, password });
-    spin.succeed(`Authenticated as ${email}. Daemon token persisted.`);
-    info("Restart the daemon to bring up the tunnel:");
-    info("  hsh tunnel stop  &&  hsh tunnel start  (or restart the system service)");
+    spin.succeed(`Authenticated as ${email}. Tunnel coming up...`);
+    await reportPostLoginStatus(client);
   } catch (err) {
     spin.stop();
     if (err instanceof TunnelApiError) {
@@ -349,8 +352,7 @@ const logoutSub = new Command("logout")
     }
     try {
       await client.logout();
-      success("Daemon token cleared.");
-      info("Restart the daemon to take the tunnel down.");
+      success("Daemon token cleared. Tunnel torn down.");
     } catch (err) {
       renderApiError(err);
       process.exitCode = 1;
@@ -425,7 +427,16 @@ const configSetSub = new Command("set")
     try {
       await client.updateConfig(req);
       success(`Set ${key} = ${value}`);
-      info("Restart the daemon for the change to take effect.");
+      // The daemon picks up api-url on the next login; grpc-url and
+      // log-level only apply on the next bring-up. Telling users
+      // "log out + back in" is the right hint for the api-url case;
+      // we don't differentiate today because most edits happen
+      // before login anyway.
+      if (key.toLowerCase() === "api-url" || key.toLowerCase() === "api_url") {
+        info("Run `hsh tunnel login` to authenticate against the new gateway.");
+      } else {
+        info("Daemon will use the new value on the next bring-up (login or restart).");
+      }
     } catch (err) {
       renderApiError(err);
       process.exitCode = 1;
@@ -675,6 +686,43 @@ export const tunnelCommand = new Command("tunnel")
  */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * After a successful login the daemon hot-starts the tunnel from its
+ * persistTokenFromLogin hook (RD-216 hot-reload). The bring-up can
+ * either succeed (Status.running flips to true) or fail (Status.running
+ * stays false but Status.last_error is populated).
+ *
+ * We do a short polling loop here — bring-up usually finishes in
+ * 50-200ms, but the gateway dial + connection fetch take a few hundred
+ * milliseconds in pessimistic cases. Cap the wait so a wedged daemon
+ * doesn't hold the CLI forever; the user can always run `hsh tunnel
+ * status` themselves later.
+ */
+async function reportPostLoginStatus(client: TunnelClient): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      const s = await client.status();
+      if (s.running) {
+        success("Tunnel is up.");
+        info("Run `hsh tunnel connections` to list reachable hosts.");
+        return;
+      }
+      if (s.last_error) {
+        error(`Tunnel failed to come up: ${s.last_error}`);
+        info("Run `hsh tunnel status` for the current state.");
+        return;
+      }
+    } catch {
+      // ignore transient errors during the bring-up window
+    }
+    await sleep(200);
+  }
+  warn(
+    "Tunnel did not report Running within 5s — run `hsh tunnel status` to check progress."
+  );
 }
 
 /**
