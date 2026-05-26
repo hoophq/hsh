@@ -19,17 +19,23 @@ import { dirname, join } from "path";
 /**
  * Default socket path on each platform. These match the constants
  * exported from tunnel/ipc/socket.go in hoophq/hoop.
+ *
+ * On Unix the socket and the control-token live inside the same
+ * /var/run/hsh/ directory; that directory is created by systemd's
+ * `RuntimeDirectory=hsh` clause (or by the macOS LaunchDaemon
+ * installer) so the OS owns its lifecycle and we don't have to
+ * recreate it after a reboot.
  */
 export const DEFAULT_SOCKET_PATH = {
-  unix: "/var/run/hsh.sock",
+  unix: "/var/run/hsh/hsh.sock",
   win32: "\\\\.\\pipe\\hsh",
 } as const;
 
 /**
- * Default token-file path. Lives in a per-OS directory the system
- * service installer (RD-217) creates with root:hsh ownership. On
- * macOS/Linux the daemon writes mode 0640, so the installing user must
- * be a member of group `hsh` to read it.
+ * Default token-file path. Lives in the same runtime directory as the
+ * socket so a single chown of /var/run/hsh/ grants the `hsh` group
+ * access to both. On macOS/Linux the daemon writes mode 0640, so the
+ * caller's effective uid/gid must include the `hsh` group to read it.
  */
 export const DEFAULT_TOKEN_PATH = {
   unix: "/var/run/hsh/control-token",
