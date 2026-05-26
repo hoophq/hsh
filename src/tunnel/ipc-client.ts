@@ -19,6 +19,7 @@ import type {
   ConnectionsResponse,
   ErrorBody,
   ErrorCode,
+  LoginLocalRequest,
   LoginPollResponse,
   LoginStartResponse,
   ReconnectResponse,
@@ -143,6 +144,17 @@ export class TunnelClient {
   loginPoll(state: string): Promise<LoginPollResponse> {
     if (!state) throw new Error("loginPoll: state is required");
     return this.do<LoginPollResponse>("GET", `/v1/login/poll?state=${encodeURIComponent(state)}`);
+  }
+
+  /**
+   * POST /v1/login/local — synchronous email+password login against
+   * gateways whose `auth_method` is "local". Returns void on the
+   * daemon's 204; throws TunnelApiError with the gateway's message
+   * (already normalised to "invalid email or password" for 401/404)
+   * on failure.
+   */
+  async loginLocal(req: LoginLocalRequest): Promise<void> {
+    await this.do<void>("POST", "/v1/login/local", req);
   }
 
   async logout(): Promise<void> {

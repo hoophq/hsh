@@ -43,6 +43,12 @@ import {
   resolveTokenPath,
 } from "../tunnel/socket-path.ts";
 import type { Connection } from "../tunnel/types.ts";
+import { getPublicServerInfo } from "../api/serverinfo.ts";
+import {
+  promptLine,
+  promptPassword,
+  PromptCancelledError,
+} from "../auth/prompt.ts";
 
 // ----------------------------------------------------------------------
 // hsh tunnel status
@@ -63,13 +69,17 @@ const statusSub = new Command("status")
     try {
       const s = await client.status();
       console.log(chalk.bold("\nHoop Tunnel\n"));
+      // `since` may arrive as the Go zero time ("0001-01-01T00:00:00Z")
+      // when the daemon never entered the running state — render only
+      // when it points at a real date so the UI doesn't say "year 1".
+      const since = parseRealDate(s.since);
       keyValue({
         Daemon: s.running ? chalk.green("running") : chalk.yellow("idle"),
         "Daemon version": s.daemon_version,
         Auth: s.logged_in
           ? chalk.green("authenticated")
           : chalk.red("not authenticated"),
-        ...(s.since ? { Since: new Date(s.since).toLocaleString() } : {}),
+        ...(since ? { Since: since.toLocaleString() } : {}),
         ...(s.last_error ? { "Last error": chalk.red(s.last_error) } : {}),
       });
       console.log();
@@ -139,6 +149,7 @@ const loginSub = new Command("login")
     // Pre-flight: if the daemon doesn't have an api_url set, calling
     // /v1/login/start would fail with a fairly opaque message. Tell
     // the user explicitly so they know which knob to turn.
+    let apiUrl: string;
     try {
       const cfg = await client.config();
       if (!cfg.api_url) {
@@ -147,63 +158,183 @@ const loginSub = new Command("login")
         process.exitCode = 1;
         return;
       }
+      apiUrl = cfg.api_url;
     } catch (err) {
       renderApiError(err);
       process.exitCode = 1;
       return;
     }
 
-    // Kick off the daemon-owned OAuth.
-    let started;
+    // Discover the gateway's auth method directly (unauthenticated
+    // endpoint, no daemon round-trip needed). This lets us branch
+    // between the OIDC browser flow and the local-auth email/password
+    // prompt without the daemon needing to know which one to pick.
+    let serverInfo;
     try {
-      started = await client.loginStart();
+      serverInfo = await getPublicServerInfo(apiUrl);
     } catch (err) {
-      renderApiError(err);
+      error(`Could not detect auth method: ${(err as Error).message}`);
+      info(`Verify the api-url: hsh tunnel config get`);
       process.exitCode = 1;
       return;
     }
 
-    info(`Opening browser to authenticate at the hoop gateway...`);
-    if (opts.browser) {
-      try {
-        await open(started.browser_url);
-      } catch {
-        warn("Could not open the browser automatically.");
-      }
-    }
-    info(`If the browser does not open, visit:\n  ${started.browser_url}\n`);
-
-    // Poll until the daemon transitions to done/error or we hit the
-    // user-supplied timeout. The daemon enforces its own 3-minute
-    // timeout independently; our client timeout exists to bound the
-    // foreground command in case the daemon is wedged.
-    const spin = spinner("Waiting for the browser callback...");
-    const deadline = Date.now() + opts.timeout * 1000;
-    try {
-      while (Date.now() < deadline) {
-        const poll = await client.loginPoll(started.state);
-        if (poll.status === "done") {
-          spin.succeed("Authenticated. Daemon token persisted.");
-          info("Restart the daemon to bring up the tunnel:");
-          info("  hsh tunnel stop  &&  hsh tunnel start  (or restart the system service)");
-          return;
-        }
-        if (poll.status === "error") {
-          spin.fail(`Login failed: ${poll.error ?? "unknown error"}`);
-          process.exitCode = 1;
-          return;
-        }
-        // pending — wait and retry
-        await sleep(1000);
-      }
-      spin.fail(`Login did not complete within ${opts.timeout}s`);
-      process.exitCode = 1;
-    } catch (err) {
-      spin.stop();
-      renderApiError(err);
-      process.exitCode = 1;
+    switch (serverInfo.authMethod) {
+      case "local":
+        await runLocalAuthLogin(client, apiUrl, serverInfo.setupRequired);
+        return;
+      case "oidc":
+        await runOidcLogin(client, opts);
+        return;
+      case "saml":
+        error("SAML authentication is not yet supported by the tunnel daemon.");
+        info("Use the Hoop web UI to obtain a token, then write it to the daemon config manually.");
+        process.exitCode = 1;
+        return;
+      default:
+        error(`Unsupported auth method '${serverInfo.authMethod}' reported by the gateway.`);
+        process.exitCode = 1;
+        return;
     }
   });
+
+/**
+ * Drive the daemon-owned OIDC flow: POST /v1/login/start → open
+ * browser → poll /v1/login/poll until done/error. The daemon owns the
+ * callback server (port 3587), so the only state we hold here is the
+ * `state` token from /v1/login/start.
+ */
+async function runOidcLogin(
+  client: TunnelClient,
+  opts: { browser: boolean; timeout: number }
+): Promise<void> {
+  let started;
+  try {
+    started = await client.loginStart();
+  } catch (err) {
+    renderApiError(err);
+    process.exitCode = 1;
+    return;
+  }
+
+  info(`Opening browser to authenticate at the hoop gateway...`);
+  if (opts.browser) {
+    try {
+      await open(started.browser_url);
+    } catch {
+      warn("Could not open the browser automatically.");
+    }
+  }
+  info(`If the browser does not open, visit:\n  ${started.browser_url}\n`);
+
+  // Poll until the daemon transitions to done/error or we hit the
+  // user-supplied timeout. The daemon enforces its own 3-minute
+  // timeout independently; our client timeout exists to bound the
+  // foreground command in case the daemon is wedged.
+  const spin = spinner("Waiting for the browser callback...");
+  const deadline = Date.now() + opts.timeout * 1000;
+  try {
+    while (Date.now() < deadline) {
+      const poll = await client.loginPoll(started.state);
+      if (poll.status === "done") {
+        spin.succeed("Authenticated. Daemon token persisted.");
+        info("Restart the daemon to bring up the tunnel:");
+        info("  hsh tunnel stop  &&  hsh tunnel start  (or restart the system service)");
+        return;
+      }
+      if (poll.status === "error") {
+        spin.fail(`Login failed: ${poll.error ?? "unknown error"}`);
+        process.exitCode = 1;
+        return;
+      }
+      // pending — wait and retry
+      await sleep(1000);
+    }
+    spin.fail(`Login did not complete within ${opts.timeout}s`);
+    process.exitCode = 1;
+  } catch (err) {
+    spin.stop();
+    renderApiError(err);
+    process.exitCode = 1;
+  }
+}
+
+/**
+ * Drive the local-auth flow against gateways whose auth_method is
+ * "local": prompt for email/password locally, ship them to the daemon
+ * via POST /v1/login/local. The daemon does the gateway round-trip
+ * and persists the resulting JWT.
+ *
+ * We deliberately do NOT forward credentials to the gateway from this
+ * process: doing so would require the daemon to accept a pre-issued
+ * token from the UI, which weakens the trust model (the daemon owns
+ * the token). Routing through IPC keeps the daemon as the sole writer
+ * of /etc/hsh/config.toml.
+ */
+async function runLocalAuthLogin(
+  client: TunnelClient,
+  apiUrl: string,
+  setupRequired: boolean
+): Promise<void> {
+  if (setupRequired) {
+    error("This Hoop gateway has no users yet. Register the first admin first:");
+    console.error("");
+    console.error(
+      `  curl -X POST ${apiUrl.replace(/\/+$/, "")}/api/localauth/register \\`
+    );
+    console.error(`    -H 'Content-Type: application/json' \\`);
+    console.error(
+      `    -d '{"email":"you@example.com","password":"...","name":"Your Name"}'`
+    );
+    console.error("");
+    console.error("Then run `hsh tunnel login` again.");
+    process.exitCode = 1;
+    return;
+  }
+
+  info("Local authentication. Press Ctrl-C to cancel.");
+  let email: string;
+  let password: string;
+  try {
+    email = (await promptLine("Email: ")).trim();
+    if (!email) {
+      error("Email is required.");
+      process.exitCode = 1;
+      return;
+    }
+    password = await promptPassword("Password: ");
+    if (!password) {
+      error("Password is required.");
+      process.exitCode = 1;
+      return;
+    }
+  } catch (err) {
+    if (err instanceof PromptCancelledError) {
+      error("Login cancelled.");
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+
+  const spin = spinner("Authenticating...");
+  try {
+    await client.loginLocal({ email, password });
+    spin.succeed(`Authenticated as ${email}. Daemon token persisted.`);
+    info("Restart the daemon to bring up the tunnel:");
+    info("  hsh tunnel stop  &&  hsh tunnel start  (or restart the system service)");
+  } catch (err) {
+    spin.stop();
+    if (err instanceof TunnelApiError) {
+      // The daemon translates 401/404 from the gateway into a
+      // uniform "invalid email or password" string already.
+      error(`Login failed: ${err.message}`);
+    } else {
+      renderApiError(err);
+    }
+    process.exitCode = 1;
+  }
+}
 
 const logoutSub = new Command("logout")
   .description("Clear the daemon's stored gateway token")
@@ -552,6 +683,22 @@ function sleep(ms: number): Promise<void> {
  * fall back to the previous flag value on garbage, which matches
  * commander's documented coercer signature.
  */
+/**
+ * Coerce a wire-format date into a JS Date if it represents a real
+ * moment. Go marshals zero-time as "0001-01-01T00:00:00Z" which JS
+ * parses as a valid Date in the year 1 — we want to treat that as
+ * "no value" instead of rendering "12/31/1".
+ */
+function parseRealDate(s: string | undefined): Date | undefined {
+  if (!s) return undefined;
+  const d = new Date(s);
+  if (!Number.isFinite(d.getTime())) return undefined;
+  // Anything older than 1970 is treated as the zero value. Real
+  // daemon-recorded timestamps are clock-wall now-ish.
+  if (d.getTime() < 0) return undefined;
+  return d;
+}
+
 function parseTimeout(value: string, _previous: number): number {
   const n = Number.parseInt(value, 10);
   if (!Number.isFinite(n) || n <= 0) {

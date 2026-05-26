@@ -72,14 +72,24 @@ export interface ConnectionsResponse {
 }
 
 /**
- * POST /v1/login/start response. Currently returns 501 in the daemon
- * (the OAuth flow ships with RD-216) — clients should be prepared to
- * see ApiError with code "not_implemented" and surface "sign in via
- * legacy CLI for now" rather than crash.
+ * POST /v1/login/start response. Daemon-side OAuth: the daemon binds
+ * the loopback callback and we drive the browser to BrowserURL.
  */
 export interface LoginStartResponse {
   browser_url: string;
   state: string;
+}
+
+/**
+ * POST /v1/login/local body. The non-OIDC path used by self-hosted
+ * gateways whose `auth_method` is "local" (email/password).
+ *
+ * The password traverses the local IPC socket only; the daemon does
+ * the gateway round-trip and persists the resulting JWT.
+ */
+export interface LoginLocalRequest {
+  email: string;
+  password: string;
 }
 
 export type LoginPollStatus = "pending" | "done" | "error";
