@@ -51,29 +51,39 @@ For **Kubernetes**, it's even more seamless — hsh injects the proxy and token 
 
 ### 1. Install
 
-Download the binary for your platform from [Releases](https://github.com/hoophq/hsh/releases):
+Download the archive for your platform from [Releases](https://github.com/hoophq/hsh/releases).
+Each archive contains the `hsh` CLI, the `hsh-tunneld` daemon (bundled — no
+separate download), and install/uninstall scripts.
 
 ```bash
 # macOS (Apple Silicon)
-curl -L -o hsh https://github.com/hoophq/hsh/releases/latest/download/hsh-darwin-arm64
-chmod +x hsh
-sudo mv hsh /usr/local/bin/
+curl -L -o hsh.tar.gz https://github.com/hoophq/hsh/releases/latest/download/hsh-darwin-arm64.tar.gz
 
 # macOS (Intel)
-curl -L -o hsh https://github.com/hoophq/hsh/releases/latest/download/hsh-darwin-x64
-chmod +x hsh
-sudo mv hsh /usr/local/bin/
+curl -L -o hsh.tar.gz https://github.com/hoophq/hsh/releases/latest/download/hsh-darwin-x64.tar.gz
 
 # Linux (x64)
-curl -L -o hsh https://github.com/hoophq/hsh/releases/latest/download/hsh-linux-x64
-chmod +x hsh
-sudo mv hsh /usr/local/bin/
+curl -L -o hsh.tar.gz https://github.com/hoophq/hsh/releases/latest/download/hsh-linux-x64.tar.gz
 
 # Linux (ARM64)
-curl -L -o hsh https://github.com/hoophq/hsh/releases/latest/download/hsh-linux-arm64
-chmod +x hsh
-sudo mv hsh /usr/local/bin/
+curl -L -o hsh.tar.gz https://github.com/hoophq/hsh/releases/latest/download/hsh-linux-arm64.tar.gz
 ```
+
+Then extract and install:
+
+```bash
+tar xzf hsh.tar.gz
+cd hsh-*/
+sudo install -m 0755 hsh /usr/local/bin/   # the CLI
+./install.sh                                # registers the daemon (Linux only)
+```
+
+On Linux the install script registers `hsh-tunneld` as a systemd service.
+On macOS, the daemon's LaunchDaemon support is coming — for now you can use
+`hsh` for everything that doesn't need the tunnel.
+
+Windows: download `hsh-windows-x64.zip` (or `hsh-windows-arm64.zip`), unpack
+with Explorer or `Expand-Archive`, and copy `hsh.exe` somewhere on your PATH.
 
 ### 2. Configure
 
@@ -229,14 +239,19 @@ The build script generates standalone binaries for all platforms:
 
 ```
 dist/
-├── hsh-linux-x64
-├── hsh-linux-arm64
-├── hsh-darwin-x64
-├── hsh-darwin-arm64
-└── hsh-windows-x64.exe
+├── hsh-linux-x64.tar.gz
+├── hsh-linux-arm64.tar.gz
+├── hsh-darwin-x64.tar.gz
+├── hsh-darwin-arm64.tar.gz
+├── hsh-windows-x64.zip
+├── hsh-windows-arm64.zip
+└── SHA256SUMS
 ```
 
-No runtime dependencies. Single binary. Copy and run.
+Each archive contains `hsh`, `hsh-tunneld`, and (on Unix) the install
+scripts. The bundled daemon version is resolved at build time from the
+hoophq/hoop GitHub Release; set `HSH_TUNNELD_VERSION=v0.0.X bun run build`
+to pin a specific daemon version instead of "latest".
 
 ## Architecture
 
