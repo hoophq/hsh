@@ -64,8 +64,9 @@ export class TunnelApiError extends Error {
 /**
  * Thrown when we cannot even reach the daemon (no socket file, no
  * token, connection refused). Distinct from TunnelApiError so the UI
- * can show "daemon not running, run hsh tunnel start" instead of
- * "internal error". Always wraps a cause for `--debug` callers.
+ * can show "daemon not running, run sudo systemctl start hsh-tunneld"
+ * instead of "internal error". Always wraps a cause for `--debug`
+ * callers.
  */
 export class TunnelUnavailableError extends Error {
   public readonly reason: "no-socket" | "no-token" | "connect-failed" | "timeout";

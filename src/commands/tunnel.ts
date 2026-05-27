@@ -9,33 +9,36 @@
  *
  *   - status        Show daemon running/logged-in state.
  *   - connections   List the *.hoop names the daemon is serving.
- *   - start         Spawn the bundled daemon in the foreground (dev /
- *                   pre-installer convenience; RD-217 will replace
- *                   this with a real service install).
- *   - stop          Stop a daemon spawned via `hsh tunnel start`.
+ *   - login         OAuth or local-auth flow against the gateway, with
+ *                   the daemon owning the resulting token.
+ *   - logout        Clear the daemon's stored token + tear down the
+ *                   tunnel (hot, no daemon restart needed).
+ *   - config        Get/set daemon-managed config (api-url, grpc-url,
+ *                   log-level).
  *   - daemon-path   Print the resolved hsh-tunneld binary path.
  *
- * Everything here is a thin shell over TunnelClient + the launcher; the
- * actual transport / spawn logic lives in src/tunnel/.
+ * Service lifecycle (start / stop / restart) is intentionally NOT
+ * exposed here — once `hsh-tunneld install` registers the systemd unit
+ * (RD-217), the OS service manager owns lifecycle. Use
+ * `sudo systemctl {start,stop,status} hsh-tunneld` directly or the
+ * platform-agnostic `sudo hsh-tunneld {start,stop,status}` wrapper.
+ *
+ * Everything here is a thin shell over TunnelClient (IPC); the actual
+ * transport logic lives in src/tunnel/.
  */
 
 import { Command } from "commander";
 import chalk from "chalk";
 import open from "open";
-import { getAuthData, isAuthenticated } from "../auth/store.ts";
-import { getApiUrl } from "../config/store.ts";
 import { error, info, keyValue, spinner, success, warn } from "../ui/output.ts";
-import { debug } from "../ui/log.ts";
 import {
   TunnelApiError,
   TunnelClient,
   TunnelUnavailableError,
 } from "../tunnel/ipc-client.ts";
 import {
-  checkPrivilegeHelper,
   describeDaemonBinary,
   resolveDaemonBinary,
-  spawnDaemon,
 } from "../tunnel/daemon-launcher.ts";
 import {
   readControlToken,
@@ -449,128 +452,21 @@ const configSub = new Command("config")
   .addCommand(configSetSub);
 
 // ----------------------------------------------------------------------
-// hsh tunnel start  /  hsh tunnel stop
-// ----------------------------------------------------------------------
-
-const startSub = new Command("start")
-  .description("Spawn the bundled hsh-tunneld daemon in the foreground (dev mode)")
-  .option(
-    "--socket <path>",
-    "Override the IPC socket path (HSH_TUNNELD_SOCKET also works)"
-  )
-  .option(
-    "--token-file <path>",
-    "Override the control-token file path (HSH_TUNNELD_TOKEN_FILE also works)"
-  )
-  .option("--session <seed>", "Session seed (controls the /48 prefix)")
-  .action(
-    async (opts: { socket?: string; tokenFile?: string; session?: string }) => {
-      // 1. Pre-flight: gateway URL + token must be present.
-      const apiUrl = getApiUrl();
-      if (!apiUrl) {
-        error("No API URL configured. Run: hsh config set api-url <url>");
-        process.exitCode = 1;
-        return;
-      }
-      if (!isAuthenticated()) {
-        error("Not authenticated. Run: hsh login");
-        process.exitCode = 1;
-        return;
-      }
-      const auth = getAuthData()!;
-
-      // 2. Find the daemon binary.
-      const bin = resolveDaemonBinary();
-      if (!bin.path) {
-        error(
-          `hsh-tunneld binary not found. Set HSH_TUNNELD_PATH or install the bundled package.`
-        );
-        info(`Searched: ${bin.searched.join(", ")}`);
-        process.exitCode = 1;
-        return;
-      }
-
-      // 3. Pre-flight: sudo / elevation helper.
-      const priv = checkPrivilegeHelper();
-      if (!priv.ok) {
-        error(priv.reason ?? "Privilege helper unavailable");
-        process.exitCode = 1;
-        return;
-      }
-
-      // 4. Decide socket / token paths.
-      const socketPath =
-        opts.socket ?? process.env.HSH_TUNNELD_SOCKET ?? resolveSocketPath().path;
-      const tokenPath =
-        opts.tokenFile ??
-        process.env.HSH_TUNNELD_TOKEN_FILE ??
-        resolveTokenPath().path;
-
-      console.log(chalk.bold("\nStarting hsh-tunneld\n"));
-      keyValue({
-        Binary: describeDaemonBinary(bin),
-        Socket: socketPath,
-        "Token file": tokenPath,
-        "API URL": apiUrl,
-      });
-      console.log();
-      info("The daemon runs under sudo; you may be prompted for your password.");
-      info("Press Ctrl-C to stop the daemon.\n");
-
-      // 5. Spawn. We INHERIT stdio so the operator sees daemon logs in
-      //    real time; this command intentionally blocks until the
-      //    daemon exits, mirroring how a foreground service runs.
-      const proc = spawnDaemon({
-        binaryPath: bin.path,
-        socketPath,
-        tokenPath,
-        apiUrl,
-        token: auth.token,
-        sessionSeed: opts.session,
-      });
-
-      // Propagate the daemon's exit code so shells / scripts can branch
-      // on it. spawn() returns a ChildProcess that emits 'exit' once.
-      const exitCode: number = await new Promise((resolveExit) => {
-        proc.on("exit", (code, signal) => {
-          debug("tunnel.spawn", "daemon exited", { code, signal });
-          // SIGINT / SIGTERM during foreground Ctrl-C should be 0.
-          if (code === null && (signal === "SIGINT" || signal === "SIGTERM")) {
-            resolveExit(0);
-            return;
-          }
-          resolveExit(code ?? 1);
-        });
-        proc.on("error", (err) => {
-          error(`failed to spawn daemon: ${err.message}`);
-          resolveExit(1);
-        });
-      });
-      process.exitCode = exitCode;
-    }
-  );
-
-const stopSub = new Command("stop")
-  .description("Stop a hsh-tunneld daemon started via `hsh tunnel start`")
-  .action(() => {
-    // For v1 the daemon runs in the foreground under sudo. There is no
-    // PID file we maintain. The right answer for the user is "Ctrl-C
-    // the foreground process"; we surface that explicitly rather than
-    // pretending to manage something we don't.
-    //
-    // Once RD-217 lands the system-service install, this command will
-    // shell out to `systemctl stop hsh-tunneld` / `launchctl unload`
-    // / `sc stop hsh-tunneld` depending on platform.
-    warn("`hsh tunnel start` runs the daemon in the foreground.");
-    info("Press Ctrl-C in that terminal to stop it.");
-    info(
-      "Once the system-service install lands (RD-217) this will stop the registered service."
-    );
-  });
-
-// ----------------------------------------------------------------------
 // hsh tunnel daemon-path
 // ----------------------------------------------------------------------
+//
+// Service lifecycle (start / stop / restart) intentionally is NOT
+// exposed via `hsh tunnel` — once `hsh-tunneld install` has registered
+// the systemd unit (RD-217), the OS service manager owns lifecycle.
+// Users run `sudo systemctl {start,stop,status} hsh-tunneld` directly;
+// `sudo hsh-tunneld {start,stop,status}` is the platform-agnostic
+// convenience wrapper for the same operations.
+//
+// Re-introducing a `hsh tunnel start` here would imply a second
+// lifecycle path that competes with systemd, which gets into messy
+// "who owns the running process" questions on every restart. The hsh
+// CLI's job is unprivileged: it drives the running daemon via IPC and
+// gets out of the way for everything that needs root.
 
 const daemonPathSub = new Command("daemon-path")
   .description("Print the resolved hsh-tunneld binary path (debug helper)")
@@ -624,7 +520,8 @@ function renderUnavailable(err: unknown): void {
   switch (err.reason) {
     case "no-socket":
       error("Tunnel daemon socket not found.");
-      info("Start it with: hsh tunnel start");
+      info("Install the daemon with:  sudo hsh-tunneld install");
+      info("Or start it (already installed):  sudo systemctl start hsh-tunneld");
       break;
     case "no-token":
       error(err.message);
@@ -634,11 +531,11 @@ function renderUnavailable(err: unknown): void {
       break;
     case "connect-failed":
       error(err.message);
-      info("Is the daemon running? Try: hsh tunnel start");
+      info("Is the daemon running?  sudo systemctl status hsh-tunneld");
       break;
     case "timeout":
       error(err.message);
-      info("The daemon may be wedged. Check its logs and restart it.");
+      info("The daemon may be wedged.  sudo journalctl -u hsh-tunneld -n 50");
       break;
   }
 }
@@ -675,8 +572,6 @@ export const tunnelCommand = new Command("tunnel")
   .addCommand(loginSub)
   .addCommand(logoutSub)
   .addCommand(configSub)
-  .addCommand(startSub)
-  .addCommand(stopSub)
   .addCommand(daemonPathSub);
 
 /**

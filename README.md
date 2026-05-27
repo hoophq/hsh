@@ -79,8 +79,10 @@ sudo install -m 0755 hsh /usr/local/bin/   # the CLI
 ```
 
 On Linux the install script registers `hsh-tunneld` as a systemd service.
-On macOS, the daemon's LaunchDaemon support is coming — for now you can use
-`hsh` for everything that doesn't need the tunnel.
+On macOS the LaunchDaemon backend is not yet implemented; the daemon
+binary is bundled but `install.sh` prints an error directing you to the
+follow-up issue. For now you can use `hsh` for everything that doesn't
+need the tunnel.
 
 Windows: download `hsh-windows-x64.zip` (or `hsh-windows-arm64.zip`), unpack
 with Explorer or `Expand-Archive`, and copy `hsh.exe` somewhere on your PATH.

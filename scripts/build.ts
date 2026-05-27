@@ -277,8 +277,8 @@ function archiveReadme(t: BuildTarget, daemonVersion: string): string {
 \`\`\`
 
 The script self-elevates with sudo and registers hsh-tunneld with
-your system service manager (systemd on Linux, LaunchDaemon on
-macOS — coming soon).
+your system service manager. Currently supports **systemd on Linux
+only**; LaunchDaemon on macOS is tracked as an RD-217 follow-up.
 
 After installation, add yourself to the \`hsh\` group:
 
