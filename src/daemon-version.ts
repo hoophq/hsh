@@ -15,9 +15,10 @@
  *     fast-moving alpha period: cutting a new hsh release auto-picks
  *     up the most recent daemon fixes.
  *
- *   - A pinned tag like `"v0.0.123"` — overrides the default. Used to
+ *   - A pinned tag like `"1.82.0"` — overrides the default. Used to
  *     reproduce historical builds, or to deliberately downgrade the
- *     bundled daemon when a regression lands upstream.
+ *     bundled daemon when a regression lands upstream. Hoop release
+ *     tags are bare semver (`1.82.0`), *not* `v`-prefixed.
  *
  * # Env-var override
  *
@@ -27,7 +28,7 @@
  *
  * Example CI invocation:
  *
- *   HSH_TUNNELD_VERSION=v0.0.42 bun run build
+ *   HSH_TUNNELD_VERSION=1.82.0 bun run build
  *
  * # Why not in package.json
  *
@@ -37,16 +38,20 @@
  * by TypeScript — a typo (`"lates"`) becomes a compile error rather
  * than a runtime "release not found" 30 seconds into the build.
  *
+ * Current pin: `1.82.0` — the first hoop release whose hsh-tunneld
+ * assets cover Linux + macOS (amd64/arm64). Bump this when cutting a
+ * new hsh release against a newer, fully-uploaded hoop release.
+ *
  * # Build-time stamp file
  *
- * Once the build resolves the version (either "latest" -> v0.0.X or
+ * Once the build resolves the version (either "latest" -> X.Y.Z or
  * the user-pinned tag), it writes the *resolved* version into
- * `src/daemon-version.stamp.ts` (which is in .gitignore). That stamp
+ * `src/daemon-version-stamp.ts`. That stamp
  * is what `hsh --version` reads at runtime, so users always see the
  * concrete version of the daemon they have, not the symbolic
  * "latest" placeholder.
  */
-export const HSH_TUNNELD_VERSION = "latest";
+export const HSH_TUNNELD_VERSION = "1.82.0";
 
 /**
  * Type guard returning true when the version string is the symbolic
