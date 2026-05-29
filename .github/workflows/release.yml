@@ -10,10 +10,14 @@ name: Release
 #      so the Nix flake stays in sync.
 #   4. Commits the bump + lockfile changes on top of main, and force-moves the
 #      tag to the bump commit so the published binaries report the correct version.
-#   5. Cross-compiles all 5 targets on a single ubuntu runner via the existing
+#   5. Cross-compiles all 6 targets on a single ubuntu runner via the existing
 #      scripts/build.ts (Bun --compile handles cross-targeting natively).
-#   6. Generates SHA256SUMS over the raw binaries.
-#   7. Creates a GitHub Release with the binaries and SHA256SUMS attached.
+#      The build script *also* downloads `hsh-tunneld` for each target from the
+#      hoophq/hoop GitHub Release (RD-227), verifies SHA256, and assembles
+#      per-target archives (5 .tar.gz + 1 .zip) containing both binaries plus
+#      the install/uninstall wrapper scripts.
+#   6. Generates SHA256SUMS over the archives (not the raw binaries).
+#   7. Creates a GitHub Release with the archives and SHA256SUMS attached.
 #
 # Notes on the version bump:
 #   - The maintainer pushes a tag (e.g. `git tag v0.2.0 && git push origin v0.2.0`).
@@ -167,17 +171,14 @@ jobs:
           git tag -f "$TAG"
           git push origin "$TAG" --force
 
-      - name: Build binaries for all targets
+      - name: Build archives for all targets
+        # The build script downloads the matching hsh-tunneld binary from the
+        # hoophq/hoop release (resolved from HSH_TUNNELD_VERSION; "latest" by
+        # default) and assembles per-target tar.gz / zip archives. GITHUB_TOKEN
+        # raises the GitHub API anonymous quota for the resolution step.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun run build
-
-      - name: Generate SHA256SUMS
-        working-directory: dist
-        run: |
-          # `sha256sum -b` style is portable. We strip the leading `./` so the
-          # file looks clean when consumers verify with `sha256sum -c`.
-          sha256sum hsh-* > SHA256SUMS
-          echo "--- SHA256SUMS ---"
-          cat SHA256SUMS
 
       - name: Create GitHub Release
         env:
@@ -193,27 +194,27 @@ jobs:
           # `gh release create` is idempotent only via separate check; if a
           # release for this tag already exists (e.g. workflow re-run), upload
           # the assets to it instead of failing.
+          # build.ts produces 6 archives + SHA256SUMS in dist/. We upload
+          # exactly those — anything else under dist/ (cache, staging) is
+          # internal and stays in the runner.
+          ARCHIVES=(
+            dist/hsh-linux-x64.tar.gz
+            dist/hsh-linux-arm64.tar.gz
+            dist/hsh-darwin-x64.tar.gz
+            dist/hsh-darwin-arm64.tar.gz
+            dist/hsh-windows-x64.zip
+            dist/hsh-windows-arm64.zip
+            dist/SHA256SUMS
+          )
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists; uploading/clobbering assets."
-            gh release upload "$TAG" \
-              dist/hsh-linux-x64 \
-              dist/hsh-linux-arm64 \
-              dist/hsh-darwin-x64 \
-              dist/hsh-darwin-arm64 \
-              dist/hsh-windows-x64.exe \
-              dist/SHA256SUMS \
-              --clobber
+            gh release upload "$TAG" "${ARCHIVES[@]}" --clobber
           else
             gh release create "$TAG" \
               --title "hsh $VERSION" \
               --generate-notes \
               $PRERELEASE_FLAG \
-              dist/hsh-linux-x64 \
-              dist/hsh-linux-arm64 \
-              dist/hsh-darwin-x64 \
-              dist/hsh-darwin-arm64 \
-              dist/hsh-windows-x64.exe \
-              dist/SHA256SUMS
+              "${ARCHIVES[@]}"
           fi
 
       - name: Trigger brew tap update (hoophq/brew)
