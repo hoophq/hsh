@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Hoop Tunnel</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Hoop Tunnel</h1>
+      <div id="status-pill" class="pill pill-unknown">
+        <span class="dot"></span>
+        <span class="label">checking…</span>
+      </div>
+    </header>
+
+    <main>
+      <!-- Status panel: present once we know whether the daemon is up. -->
+      <section id="panel-status" hidden>
+        <h2>Status</h2>
+        <dl class="kv">
+          <dt>Daemon</dt><dd id="kv-daemon">—</dd>
+          <dt>Daemon version</dt><dd id="kv-daemon-version">—</dd>
+          <dt>Authenticated</dt><dd id="kv-auth">—</dd>
+          <dt>Logged in since</dt><dd id="kv-since">—</dd>
+          <dt>Last error</dt><dd id="kv-last-error">—</dd>
+        </dl>
+
+        <!-- Sign-in / sign-out actions. Visibility toggled by app.js. -->
+        <div id="actions">
+          <button id="btn-signin" type="button" hidden>Sign in with Hoop</button>
+          <button id="btn-signout" type="button" hidden class="secondary">Sign out</button>
+        </div>
+
+        <!-- Sign-in progress / error live region. Hidden until used. -->
+        <p id="signin-message" role="status" hidden></p>
+      </section>
+
+      <!-- Connections panel: hidden until we have a logged-in tunnel. -->
+      <section id="panel-connections" hidden>
+        <h2>Connections</h2>
+        <p class="hint">
+          Click any host to copy a ready-to-paste connection command.
+        </p>
+        <ul id="connections-list" class="conn-list"></ul>
+      </section>
+
+      <!-- Empty-state for the "no connections yet" case after login. -->
+      <section id="panel-empty" hidden>
+        <h2>No connections</h2>
+        <p>
+          You're signed in, but the gateway didn't return any tunnel-able
+          connections for your user. Check your access policies with your
+          Hoop admin.
+        </p>
+      </section>
+
+      <!-- Unreachable-daemon banner. Shown when the IPC socket itself
+           is down. We deliberately do NOT auto-retry forever; the user
+           clicks the button to retry. -->
+      <section id="panel-unreachable" hidden>
+        <h2>Daemon unreachable</h2>
+        <p>
+          The dashboard can't reach <code>hsh-tunneld</code>. Make sure
+          the service is running:
+        </p>
+        <pre><code>sudo systemctl status hsh-tunneld</code></pre>
+        <p>If it's not installed yet:</p>
+        <pre><code>sudo hsh-tunneld install</code></pre>
+        <button id="btn-retry" type="button">Retry</button>
+      </section>
+    </main>
+
+    <footer>
+      <small>
+        Hoop Tunnel dashboard ·
+        <a href="https://hoop.dev/docs/tunnel" target="_blank" rel="noopener">documentation</a>
+      </small>
+    </footer>
+
+    <script src="/assets/app.js" type="module"></script>
+  </body>
+</html>
