@@ -175,8 +175,15 @@ async function build() {
   // individual archives, so it's the trust root of the published
   // bundle.
   console.log("\nGenerating SHA256SUMS...");
-  await $`cd ${DIST} && sha256sum ${TARGETS.map((t) => t.archive).join(" ")} > SHA256SUMS`.quiet();
-  console.log(await Bun.file(join(DIST, "SHA256SUMS")).text());
+  // Bun's `$` treats each interpolation as a single literal argument
+  // (command-injection guard). A pre-joined string would therefore be
+  // passed to sha256sum as ONE filename-with-spaces, which doesn't
+  // exist. Pass the array so `$` expands it to separate arguments, and
+  // use .cwd() so the manifest lists bare archive names (not dist/…).
+  const archiveNames = TARGETS.map((t) => t.archive);
+  const sums = await $`sha256sum ${archiveNames}`.cwd(DIST).text();
+  await Bun.write(join(DIST, "SHA256SUMS"), sums);
+  console.log(sums);
 
   // Friendly final summary.
   console.log("Archives produced:");
