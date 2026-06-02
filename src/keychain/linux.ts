@@ -6,6 +6,12 @@ const ATTR_KEY = "application";
 const ATTR_VAL = "hsh";
 
 /**
+ * Bounded timeout for all secret-tool CLI calls (ms).
+ * A wedged Secret Service daemon must not block the user's shell indefinitely.
+ */
+const TIMEOUT_MS = 5000;
+
+/**
  * Linux libsecret backend — delegates to the `secret-tool` CLI provided
  * by the `libsecret-tools` package (Debian/Ubuntu) or `libsecret` (Arch,
  * Fedora).  Requires a running Secret Service daemon (gnome-keyring or
@@ -25,7 +31,7 @@ export class LinuxKeychain implements KeychainBackend {
   readonly name = "libsecret (secret-tool)";
 
   async set(value: string): Promise<void> {
-    // secret-tool store reads the secret from stdin.
+    // secret-tool store reads the secret from stdin — never on the command line.
     const result = spawnSync("secret-tool", [
       "store",
       "--label", LABEL,
@@ -33,8 +39,12 @@ export class LinuxKeychain implements KeychainBackend {
     ], {
       input: value,
       stdio: ["pipe", "pipe", "pipe"],
+      timeout: TIMEOUT_MS,
     });
 
+    if (result.error) {
+      throw new Error(`libsecret set timed out or failed to spawn: ${result.error.message}`);
+    }
     if (result.status !== 0) {
       throw new Error(
         `libsecret set failed (exit ${result.status}): ${result.stderr?.toString().trim()}`,
@@ -46,8 +56,12 @@ export class LinuxKeychain implements KeychainBackend {
     const result = spawnSync("secret-tool", [
       "lookup",
       ATTR_KEY, ATTR_VAL,
-    ], { stdio: "pipe" });
+    ], { stdio: "pipe", timeout: TIMEOUT_MS });
 
+    if (result.error) {
+      // Timeout or spawn failure — treat as absent rather than crashing.
+      return null;
+    }
     if (result.status !== 0) {
       // Non-zero means item not found or daemon unavailable — treat as absent.
       return null;
@@ -61,7 +75,7 @@ export class LinuxKeychain implements KeychainBackend {
     spawnSync("secret-tool", [
       "clear",
       ATTR_KEY, ATTR_VAL,
-    ], { stdio: "pipe" });
+    ], { stdio: "pipe", timeout: TIMEOUT_MS });
     // Ignore exit code — non-zero just means it wasn't there.
   }
 
