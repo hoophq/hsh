@@ -8,6 +8,7 @@ import {
   AuthExpiredError,
   createClient,
 } from "../src/api/client.ts";
+import { _resetKeychainCache } from "../src/keychain/auto.ts";
 
 /**
  * Tests for the silent JWT-refresh path (ENG-349).
@@ -18,7 +19,7 @@ import {
  * needs to:
  *
  *   1. Read the header on every response.
- *   2. Persist the new token (atomic write — same path as auth.json).
+ *   2. Persist the new token (OS keychain or file fallback).
  *   3. Use the new token on subsequent requests in the same process.
  *
  * Reference: hoophq/hoop PR #1415 (gateway/api/apiroutes/auth.go).
@@ -33,7 +34,7 @@ import {
  * payload. The signature is gibberish — not validated client-side.
  * `expSeconds` is the unix timestamp (seconds) for the `exp` claim;
  * default = +1h from now so the rotated token looks "fresh" when
- * persisted to auth.json (which decodes `exp` to compute expiresAt).
+ * persisted (which decodes `exp` to compute expiresAt).
  */
 function makeJwt(expSeconds: number = Math.floor(Date.now() / 1000) + 3600): string {
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" }))
@@ -46,13 +47,20 @@ function makeJwt(expSeconds: number = Math.floor(Date.now() / 1000) + 3600): str
 
 let tmpHome: string;
 let originalHome: string | undefined;
+let originalKeychainBackend: string | undefined;
 
 beforeEach(() => {
-  // Each test gets a hermetic HSH_HOME so persisted auth.json from
-  // one test doesn't bleed into another.
+  // Each test gets a hermetic HSH_HOME so persisted state from one test
+  // doesn't bleed into another.
   tmpHome = mkdtempSync(join(tmpdir(), "hsh-refresh-test-"));
   originalHome = process.env.HSH_HOME;
   process.env.HSH_HOME = tmpHome;
+
+  // Force the file backend so tests are hermetic and don't touch the
+  // real OS keychain regardless of platform.
+  originalKeychainBackend = process.env.HSH_KEYCHAIN_BACKEND;
+  process.env.HSH_KEYCHAIN_BACKEND = "file";
+  _resetKeychainCache();
 });
 
 afterEach(() => {
@@ -61,6 +69,12 @@ afterEach(() => {
   } else {
     process.env.HSH_HOME = originalHome;
   }
+  if (originalKeychainBackend === undefined) {
+    delete process.env.HSH_KEYCHAIN_BACKEND;
+  } else {
+    process.env.HSH_KEYCHAIN_BACKEND = originalKeychainBackend;
+  }
+  _resetKeychainCache();
   rmSync(tmpHome, { recursive: true, force: true });
 });
 
@@ -121,12 +135,14 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
       const client = new HoopApiClient(
         `http://127.0.0.1:${server.port}`,
         "old.token.sig",
-        (t) => {
+        async (t) => {
           handlerCalls++;
           handlerArg = t;
         },
       );
       await client.listConnections();
+      // Give the fire-and-forget persist a tick to complete.
+      await new Promise((r) => setTimeout(r, 10));
       expect(handlerCalls).toBe(1);
       expect(handlerArg).toBe(newToken);
     } finally {
@@ -146,7 +162,7 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
       const client = new HoopApiClient(
         `http://127.0.0.1:${server.port}`,
         "tok",
-        () => { handlerCalls++; },
+        async () => { handlerCalls++; },
       );
       await client.listConnections();
       expect(handlerCalls).toBe(0);
@@ -170,7 +186,7 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
       const client = new HoopApiClient(
         `http://127.0.0.1:${server.port}`,
         "tok",
-        () => { handlerCalls++; },
+        async () => { handlerCalls++; },
       );
       await client.listConnections();
       // Empty header → no rotation, keep old token.
@@ -197,7 +213,7 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
       const client = new HoopApiClient(
         `http://127.0.0.1:${server.port}`,
         "tok",
-        () => { handlerCalls++; },
+        async () => { handlerCalls++; },
       );
       await client.listConnections();
       expect(handlerCalls).toBe(0);
@@ -223,7 +239,7 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
       const client = new HoopApiClient(
         `http://127.0.0.1:${server.port}`,
         same, // start with the same token
-        () => { handlerCalls++; },
+        async () => { handlerCalls++; },
       );
       await client.listConnections();
       // Same token in == same token out: no-op, no persist.
@@ -233,7 +249,7 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
     }
   });
 
-  test("default handler persists rotated token to auth.json (atomic write)", async () => {
+  test("default handler persists rotated token to keychain (file backend in tests)", async () => {
     const newToken = makeJwt();
     const server = Bun.serve({
       port: 0,
@@ -249,16 +265,27 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
       const client = createClient(`http://127.0.0.1:${server.port}`, "tok");
       await client.listConnections();
 
+      // Give the fire-and-forget persist a tick to complete.
+      await new Promise((r) => setTimeout(r, 50));
+
+      // With HSH_KEYCHAIN_BACKEND=file, the token lands in ~/.hsh/token
+      // and the metadata (expiresAt) lands in auth.json (no token field).
+      const tokenPath = join(tmpHome, "token");
+      expect(existsSync(tokenPath)).toBe(true);
+      const storedToken = readFileSync(tokenPath, "utf-8").trim();
+      expect(storedToken).toBe(newToken);
+
       const authPath = join(tmpHome, "auth.json");
       expect(existsSync(authPath)).toBe(true);
-      const persisted = JSON.parse(readFileSync(authPath, "utf-8")) as {
-        token: string;
+      const meta = JSON.parse(readFileSync(authPath, "utf-8")) as {
+        token?: string;
         expiresAt: string;
       };
-      expect(persisted.token).toBe(newToken);
+      // Token must NOT be in auth.json any more.
+      expect(meta.token).toBeUndefined();
       // The exp we encoded into the JWT should be reflected in expiresAt
       // (within a second of "now + 1h").
-      const expiresMs = new Date(persisted.expiresAt).getTime();
+      const expiresMs = new Date(meta.expiresAt).getTime();
       const expectedMs = Date.now() + 3600 * 1000;
       expect(Math.abs(expiresMs - expectedMs)).toBeLessThan(2000);
     } finally {
@@ -317,7 +344,7 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
       const client = new HoopApiClient(
         `http://127.0.0.1:${server.port}`,
         "tok",
-        () => { handlerCalls++; },
+        async () => { handlerCalls++; },
       );
       let caught: unknown;
       try {
@@ -325,6 +352,8 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
       } catch (e) {
         caught = e;
       }
+      // Give the fire-and-forget persist a tick to complete.
+      await new Promise((r) => setTimeout(r, 10));
       // The original error still surfaces.
       expect(caught).toBeDefined();
       // But the rotation took effect.
@@ -350,7 +379,7 @@ describe("HoopApiClient: X-New-Access-Token rotation (ENG-349)", () => {
       const client = new HoopApiClient(
         `http://127.0.0.1:${server.port}`,
         "tok",
-        () => {
+        async () => {
           // Simulate disk-full / EACCES — the request must still succeed
           // and the in-memory rotation must still happen.
           throw new Error("disk full");

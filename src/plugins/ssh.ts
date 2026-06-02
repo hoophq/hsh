@@ -141,8 +141,9 @@ async function runInner(args: string[]): Promise<void> {
     }
 
     const apiUrl = getApiUrl();
-    if (!apiUrl || !isAuthenticated()) {
-      debug("ssh", `passthrough: apiUrl=${apiUrl ?? "<unset>"} authenticated=${isAuthenticated()}`);
+    const authenticated = await isAuthenticated();
+    if (!apiUrl || !authenticated) {
+      debug("ssh", `passthrough: apiUrl=${apiUrl ?? "<unset>"} authenticated=${authenticated}`);
       return passthrough(args);
     }
 

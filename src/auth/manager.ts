@@ -47,8 +47,8 @@ export async function ensureAuthenticated(): Promise<string> {
     process.exit(1);
   }
 
-  if (isAuthenticated()) {
-    return getToken()!;
+  if (await isAuthenticated()) {
+    return (await getToken())!;
   }
 
   throw new AuthRequiredError();
@@ -64,7 +64,7 @@ export async function ensureAuthenticated(): Promise<string> {
  * longer does.
  */
 export async function forceReauthenticate(): Promise<never> {
-  clearToken();
+  await clearToken();
   clearAllCachedCredentials();
   throw new AuthRequiredError("Hoop session expired (refresh token also expired)");
 }
@@ -137,8 +137,8 @@ export async function login(): Promise<void> {
   process.exit(1);
 }
 
-export function logout(): void {
-  clearToken();
+export async function logout(): Promise<void> {
+  await clearToken();
   clearAllCachedCredentials();
 }
 
