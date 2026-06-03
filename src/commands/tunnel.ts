@@ -9,6 +9,8 @@
  *
  *   - status        Show daemon running/logged-in state.
  *   - connections   List the *.hoop names the daemon is serving.
+ *   - up            Bring the tunnel netstack online (no re-auth).
+ *   - down          Take the tunnel netstack offline, stay logged in.
  *   - login         OAuth or local-auth flow against the gateway, with
  *                   the daemon owning the resulting token.
  *   - logout        Clear the daemon's stored token + tear down the
@@ -17,11 +19,20 @@
  *                   log-level).
  *   - daemon-path   Print the resolved hsh-tunneld binary path.
  *
- * Service lifecycle (start / stop / restart) is intentionally NOT
- * exposed here — once `hsh-tunneld install` registers the systemd unit
- * (RD-217), the OS service manager owns lifecycle. Use
- * `sudo systemctl {start,stop,status} hsh-tunneld` directly or the
- * platform-agnostic `sudo hsh-tunneld {start,stop,status}` wrapper.
+ * Note the distinction between two lifecycles:
+ *
+ *   1. The OS *service* (the hsh-tunneld process itself): owned by the
+ *      service manager once `hsh-tunneld install` registers the systemd
+ *      unit (RD-217). Use `sudo systemctl {start,stop} hsh-tunneld` or
+ *      `sudo hsh-tunneld {start,stop}`. NOT exposed via `hsh tunnel` —
+ *      it needs root and competing with systemd over "who owns the
+ *      process" is messy.
+ *
+ *   2. The *tunnel netstack* (the gVisor stack + gateway pipes inside a
+ *      running daemon): owned by `hsh tunnel up` / `down`. These are
+ *      unprivileged IPC calls that pause/resume the tunnel without
+ *      touching authentication, so you can stop routing *.hoop traffic
+ *      without logging out and re-authenticating.
  *
  * Everything here is a thin shell over TunnelClient (IPC); the actual
  * transport logic lives in src/tunnel/.
@@ -123,6 +134,72 @@ const connectionsSub = new Command("connections")
   });
 
 // ----------------------------------------------------------------------
+// hsh tunnel up / down
+// ----------------------------------------------------------------------
+
+const upSub = new Command("up")
+  .description("Bring the tunnel online (uses the daemon's existing login)")
+  .action(async () => {
+    let client: TunnelClient;
+    try {
+      client = TunnelClient.connect();
+    } catch (err) {
+      renderUnavailable(err);
+      process.exitCode = 1;
+      return;
+    }
+
+    const spin = spinner("Bringing the tunnel up...");
+    try {
+      const resp = await client.up();
+      if (resp.already_up) {
+        spin.succeed("Tunnel is already up.");
+      } else {
+        spin.succeed("Tunnel is up.");
+      }
+      info("Run `hsh tunnel connections` to list reachable hosts.");
+    } catch (err) {
+      spin.stop();
+      // A logged-out daemon can't bring the tunnel up — point the user
+      // at login rather than showing a raw 409.
+      if (err instanceof TunnelApiError && err.isNotLoggedIn()) {
+        error("Daemon is not logged in.");
+        info("Authenticate first:  hsh login");
+        process.exitCode = 1;
+        return;
+      }
+      renderApiError(err);
+      process.exitCode = 1;
+    }
+  });
+
+const downSub = new Command("down")
+  .description("Take the tunnel offline (stays logged in)")
+  .action(async () => {
+    let client: TunnelClient;
+    try {
+      client = TunnelClient.connect();
+    } catch (err) {
+      renderUnavailable(err);
+      process.exitCode = 1;
+      return;
+    }
+
+    try {
+      const resp = await client.down();
+      if (resp.already_down) {
+        info("Tunnel is already down.");
+      } else {
+        success("Tunnel is down. You are still logged in.");
+        info("Bring it back up with:  hsh tunnel up");
+      }
+    } catch (err) {
+      renderApiError(err);
+      process.exitCode = 1;
+    }
+  });
+
+// ----------------------------------------------------------------------
 // hsh tunnel login / logout
 // ----------------------------------------------------------------------
 
@@ -140,66 +217,101 @@ const loginSub = new Command("login")
     180
   )
   .action(async (opts: { browser: boolean; timeout: number }) => {
-    let client: TunnelClient;
-    try {
-      client = TunnelClient.connect();
-    } catch (err) {
-      renderUnavailable(err);
-      process.exitCode = 1;
-      return;
-    }
-
-    // Pre-flight: if the daemon doesn't have an api_url set, calling
-    // /v1/login/start would fail with a fairly opaque message. Tell
-    // the user explicitly so they know which knob to turn.
-    let apiUrl: string;
-    try {
-      const cfg = await client.config();
-      if (!cfg.api_url) {
-        error("Daemon has no api_url configured.");
-        info("Set it first: hsh tunnel config set api-url <url>");
-        process.exitCode = 1;
-        return;
-      }
-      apiUrl = cfg.api_url;
-    } catch (err) {
-      renderApiError(err);
-      process.exitCode = 1;
-      return;
-    }
-
-    // Discover the gateway's auth method directly (unauthenticated
-    // endpoint, no daemon round-trip needed). This lets us branch
-    // between the OIDC browser flow and the local-auth email/password
-    // prompt without the daemon needing to know which one to pick.
-    let serverInfo;
-    try {
-      serverInfo = await getPublicServerInfo(apiUrl);
-    } catch (err) {
-      error(`Could not detect auth method: ${(err as Error).message}`);
-      info(`Verify the api-url: hsh tunnel config get`);
-      process.exitCode = 1;
-      return;
-    }
-
-    switch (serverInfo.authMethod) {
-      case "local":
-        await runLocalAuthLogin(client, apiUrl, serverInfo.setupRequired);
-        return;
-      case "oidc":
-        await runOidcLogin(client, opts);
-        return;
-      case "saml":
-        error("SAML authentication is not yet supported by the tunnel daemon.");
-        info("Use the Hoop web UI to obtain a token, then write it to the daemon config manually.");
-        process.exitCode = 1;
-        return;
-      default:
-        error(`Unsupported auth method '${serverInfo.authMethod}' reported by the gateway.`);
-        process.exitCode = 1;
-        return;
-    }
+    const ok = await loginDaemon({ ...opts, optional: false });
+    if (!ok) process.exitCode = 1;
   });
+
+/**
+ * Drive the daemon-owned login flow end to end: detect the gateway's
+ * auth method and run the matching OIDC or local-auth path, then report
+ * the resulting tunnel state.
+ *
+ * `optional` controls the contract for the "daemon not usable" cases
+ * (not installed, not running, no api_url configured):
+ *
+ *   - optional=false (interactive `hsh tunnel login`): these are hard
+ *     errors — the user explicitly targeted the daemon, so we tell them
+ *     exactly what to fix and return false.
+ *
+ *   - optional=true  (best-effort follow-up from the unified
+ *     `hsh login`): these are silently skipped and return true. The
+ *     user asked to log the *CLI* in; the daemon is a bonus, not a
+ *     requirement, and a missing daemon must not fail `hsh login`.
+ *
+ * Returns true when the daemon login succeeded OR was legitimately
+ * skipped (optional=true), false on a real failure.
+ */
+export async function loginDaemon(opts: {
+  browser: boolean;
+  timeout: number;
+  optional: boolean;
+}): Promise<boolean> {
+  let client: TunnelClient;
+  try {
+    client = TunnelClient.connect();
+  } catch (err) {
+    if (opts.optional) {
+      // Daemon not installed/running — skip silently. The CLI login
+      // already succeeded; the tunnel is simply not part of this setup.
+      return true;
+    }
+    renderUnavailable(err);
+    return false;
+  }
+
+  // Pre-flight: if the daemon doesn't have an api_url set, calling
+  // /v1/login/start would fail with a fairly opaque message. Tell
+  // the user explicitly so they know which knob to turn.
+  let apiUrl: string;
+  try {
+    const cfg = await client.config();
+    if (!cfg.api_url) {
+      if (opts.optional) {
+        // Best-effort: nudge but don't fail. The user can wire the
+        // daemon up later with `hsh tunnel config set api-url`.
+        info("Tunnel daemon detected but not configured — skipping tunnel login.");
+        info("Configure it with: hsh tunnel config set api-url <url>");
+        return true;
+      }
+      error("Daemon has no api_url configured.");
+      info("Set it first: hsh tunnel config set api-url <url>");
+      return false;
+    }
+    apiUrl = cfg.api_url;
+  } catch (err) {
+    if (opts.optional) return true;
+    renderApiError(err);
+    return false;
+  }
+
+  // Discover the gateway's auth method directly (unauthenticated
+  // endpoint, no daemon round-trip needed). This lets us branch
+  // between the OIDC browser flow and the local-auth email/password
+  // prompt without the daemon needing to know which one to pick.
+  let serverInfo;
+  try {
+    serverInfo = await getPublicServerInfo(apiUrl);
+  } catch (err) {
+    if (opts.optional) return true;
+    error(`Could not detect auth method: ${(err as Error).message}`);
+    info(`Verify the api-url: hsh tunnel config get`);
+    return false;
+  }
+
+  switch (serverInfo.authMethod) {
+    case "local":
+      return runLocalAuthLogin(client, apiUrl, serverInfo.setupRequired);
+    case "oidc":
+      return runOidcLogin(client, opts);
+    case "saml":
+      error("SAML authentication is not yet supported by the tunnel daemon.");
+      info("Use the Hoop web UI to obtain a token, then write it to the daemon config manually.");
+      return false;
+    default:
+      error(`Unsupported auth method '${serverInfo.authMethod}' reported by the gateway.`);
+      return false;
+  }
+}
 
 /**
  * Drive the daemon-owned OIDC flow: POST /v1/login/start → open
@@ -210,14 +322,13 @@ const loginSub = new Command("login")
 async function runOidcLogin(
   client: TunnelClient,
   opts: { browser: boolean; timeout: number }
-): Promise<void> {
+): Promise<boolean> {
   let started;
   try {
     started = await client.loginStart();
   } catch (err) {
     renderApiError(err);
-    process.exitCode = 1;
-    return;
+    return false;
   }
 
   info(`Opening browser to authenticate at the hoop gateway...`);
@@ -247,22 +358,21 @@ async function runOidcLogin(
         // Surface either outcome via a follow-up status call rather
         // than asking the user to run `hsh tunnel status` themselves.
         await reportPostLoginStatus(client);
-        return;
+        return true;
       }
       if (poll.status === "error") {
         spin.fail(`Login failed: ${poll.error ?? "unknown error"}`);
-        process.exitCode = 1;
-        return;
+        return false;
       }
       // pending — wait and retry
       await sleep(1000);
     }
     spin.fail(`Login did not complete within ${opts.timeout}s`);
-    process.exitCode = 1;
+    return false;
   } catch (err) {
     spin.stop();
     renderApiError(err);
-    process.exitCode = 1;
+    return false;
   }
 }
 
@@ -282,7 +392,7 @@ async function runLocalAuthLogin(
   client: TunnelClient,
   apiUrl: string,
   setupRequired: boolean
-): Promise<void> {
+): Promise<boolean> {
   if (setupRequired) {
     error("This Hoop gateway has no users yet. Register the first admin first:");
     console.error("");
@@ -295,8 +405,7 @@ async function runLocalAuthLogin(
     );
     console.error("");
     console.error("Then run `hsh tunnel login` again.");
-    process.exitCode = 1;
-    return;
+    return false;
   }
 
   info("Local authentication. Press Ctrl-C to cancel.");
@@ -306,20 +415,17 @@ async function runLocalAuthLogin(
     email = (await promptLine("Email: ")).trim();
     if (!email) {
       error("Email is required.");
-      process.exitCode = 1;
-      return;
+      return false;
     }
     password = await promptPassword("Password: ");
     if (!password) {
       error("Password is required.");
-      process.exitCode = 1;
-      return;
+      return false;
     }
   } catch (err) {
     if (err instanceof PromptCancelledError) {
       error("Login cancelled.");
-      process.exitCode = 1;
-      return;
+      return false;
     }
     throw err;
   }
@@ -329,6 +435,7 @@ async function runLocalAuthLogin(
     await client.loginLocal({ email, password });
     spin.succeed(`Authenticated as ${email}. Tunnel coming up...`);
     await reportPostLoginStatus(client);
+    return true;
   } catch (err) {
     spin.stop();
     if (err instanceof TunnelApiError) {
@@ -338,28 +445,41 @@ async function runLocalAuthLogin(
     } else {
       renderApiError(err);
     }
-    process.exitCode = 1;
+    return false;
+  }
+}
+
+/**
+ * Tear down the daemon's session as a best-effort follow-up to the
+ * unified `hsh logout`. Mirrors loginDaemon's `optional` contract: a
+ * missing/unreachable daemon is silently skipped (returns true), since
+ * `hsh logout` must always succeed at clearing the CLI's own token.
+ */
+export async function logoutDaemon(optional: boolean): Promise<boolean> {
+  let client: TunnelClient;
+  try {
+    client = TunnelClient.connect();
+  } catch (err) {
+    if (optional) return true;
+    renderUnavailable(err);
+    return false;
+  }
+  try {
+    await client.logout();
+    success("Daemon token cleared. Tunnel torn down.");
+    return true;
+  } catch (err) {
+    if (optional) return true;
+    renderApiError(err);
+    return false;
   }
 }
 
 const logoutSub = new Command("logout")
   .description("Clear the daemon's stored gateway token")
   .action(async () => {
-    let client: TunnelClient;
-    try {
-      client = TunnelClient.connect();
-    } catch (err) {
-      renderUnavailable(err);
-      process.exitCode = 1;
-      return;
-    }
-    try {
-      await client.logout();
-      success("Daemon token cleared. Tunnel torn down.");
-    } catch (err) {
-      renderApiError(err);
-      process.exitCode = 1;
-    }
+    const ok = await logoutDaemon(false);
+    if (!ok) process.exitCode = 1;
   });
 
 // ----------------------------------------------------------------------
@@ -569,6 +689,8 @@ export const tunnelCommand = new Command("tunnel")
   .description("Control the hsh-tunneld daemon (local tunnel for *.hoop hosts)")
   .addCommand(statusSub)
   .addCommand(connectionsSub)
+  .addCommand(upSub)
+  .addCommand(downSub)
   .addCommand(loginSub)
   .addCommand(logoutSub)
   .addCommand(configSub)
