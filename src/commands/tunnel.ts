@@ -254,10 +254,12 @@ const downSub = new Command("down")
 
 const loginSub = new Command("login")
   .description("Authenticate the daemon with the hoop gateway (browser flow)")
+  // No default arg: commander auto-defaults `browser` to true and sets
+  // it false when --no-browser is passed. An explicit `false` default
+  // would pin it false, so the browser never opened automatically.
   .option(
     "--no-browser",
-    "Print the login URL instead of opening the browser",
-    false
+    "Print the login URL instead of opening the browser"
   )
   .option(
     "--timeout <seconds>",
