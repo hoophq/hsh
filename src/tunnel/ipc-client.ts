@@ -23,7 +23,10 @@ import type {
   LoginPollResponse,
   LoginStartResponse,
   ReconnectResponse,
+  RefreshConnectionsResponse,
   StatusResponse,
+  TunnelDownResponse,
+  TunnelUpResponse,
 } from "./types.ts";
 
 /**
@@ -58,6 +61,15 @@ export class TunnelApiError extends Error {
   /** 501 — endpoint exists in the spec but the daemon hasn't wired it yet. */
   isNotImplemented(): boolean {
     return this.statusCode === 501;
+  }
+
+  /**
+   * 409 with code "not_logged_in" — the operation needs a token the
+   * daemon doesn't have (e.g. `tunnel up` while logged out). Distinct
+   * from 401, which is a control-token rejection.
+   */
+  isNotLoggedIn(): boolean {
+    return this.statusCode === 409 && this.code === "not_logged_in";
   }
 }
 
@@ -172,6 +184,28 @@ export class TunnelClient {
 
   reconnect(): Promise<ReconnectResponse> {
     return this.do<ReconnectResponse>("POST", "/v1/reconnect");
+  }
+
+  /**
+   * Bring the tunnel up using the daemon's persisted token. Throws a
+   * TunnelApiError with isNotLoggedIn()===true when the daemon has no
+   * token.
+   */
+  up(): Promise<TunnelUpResponse> {
+    return this.do<TunnelUpResponse>("POST", "/v1/tunnel/up");
+  }
+
+  /** Tear the tunnel down while keeping the daemon logged in. */
+  down(): Promise<TunnelDownResponse> {
+    return this.do<TunnelDownResponse>("POST", "/v1/tunnel/down");
+  }
+
+  /**
+   * Re-fetch and reconcile the connection list now. No-op (running:
+   * false) when the tunnel is down.
+   */
+  refreshConnections(): Promise<RefreshConnectionsResponse> {
+    return this.do<RefreshConnectionsResponse>("POST", "/v1/connections/refresh");
   }
 
   // ----- transport -----

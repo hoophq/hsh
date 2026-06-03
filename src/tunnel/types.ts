@@ -118,6 +118,35 @@ export interface ReconnectResponse {
 }
 
 /**
+ * Returned by POST /v1/tunnel/up. Bringing the tunnel up is
+ * synchronous, so `running` is always true on a 200 response.
+ * `already_up` is true when the call was a no-op (tunnel was already
+ * up), letting the CLI say "already up" instead of "brought up".
+ */
+export interface TunnelUpResponse {
+  running: boolean;
+  already_up: boolean;
+}
+
+/**
+ * Returned by POST /v1/tunnel/down. Tearing down is idempotent;
+ * `already_down` is true when the daemon was already idle.
+ */
+export interface TunnelDownResponse {
+  already_down: boolean;
+}
+
+/**
+ * Returned by POST /v1/connections/refresh. `running` is false when the
+ * tunnel was down at refresh time (the call was a no-op); `count` is the
+ * number of active connections after the refresh.
+ */
+export interface RefreshConnectionsResponse {
+  running: boolean;
+  count: number;
+}
+
+/**
  * Canonical JSON error body returned by every non-2xx response from
  * the control plane. The `code` field is the machine-readable identifier
  * — UIs should branch on it rather than string-matching `error`.
@@ -127,6 +156,7 @@ export interface ReconnectResponse {
  *   - "bad_request"      → 400, malformed body or missing query param
  *   - "not_found"        → 404, unknown route
  *   - "not_implemented"  → 501, endpoint advertised but not yet wired
+ *   - "not_logged_in"    → 409, operation needs a token the daemon lacks
  *   - "internal"         → 500, daemon-side failure
  */
 export interface ErrorBody {
@@ -139,4 +169,5 @@ export type ErrorCode =
   | "bad_request"
   | "not_found"
   | "not_implemented"
+  | "not_logged_in"
   | "internal";

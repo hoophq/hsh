@@ -38,9 +38,12 @@
  * by TypeScript — a typo (`"lates"`) becomes a compile error rather
  * than a runtime "release not found" 30 seconds into the build.
  *
- * Current pin: `1.82.0` — the first hoop release whose hsh-tunneld
- * assets cover Linux + macOS (amd64/arm64). Bump this when cutting a
- * new hsh release against a newer, fully-uploaded hoop release.
+ * Current pin: `1.86.0` — the hoop release that ships the tunnel
+ * up/down lifecycle endpoints (POST /v1/tunnel/{up,down}) and the
+ * connection-list refresh (POST /v1/connections/refresh) that the
+ * `hsh tunnel up|down|refresh` commands depend on. Bump this when
+ * cutting a new hsh release against a newer, fully-uploaded hoop
+ * release.
  *
  * # Build-time stamp file
  *
@@ -51,7 +54,7 @@
  * concrete version of the daemon they have, not the symbolic
  * "latest" placeholder.
  */
-export const HSH_TUNNELD_VERSION = "1.82.0";
+export const HSH_TUNNELD_VERSION = "1.86.0";
 
 /**
  * Type guard returning true when the version string is the symbolic
