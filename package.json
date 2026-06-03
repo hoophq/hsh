@@ -1,6 +1,6 @@
 {
   "name": "hsh",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Hoop Shell Plugins - Seamless access to infrastructure via shell integration",
   "type": "module",
   "main": "src/index.ts",
