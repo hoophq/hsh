@@ -6,15 +6,20 @@ import { error } from "../ui/output.ts";
 
 export const loginCommand = new Command("login")
   .description("Authenticate with Hoop (and the tunnel daemon if installed)")
+  // NOTE: do NOT pass a default value to a `--no-*` option. Commander
+  // auto-defaults the derived boolean (`tunnel`, `browser`) to `true`
+  // and flips it to `false` when the flag is present. Passing an
+  // explicit `false` here overrides that auto-default, pinning the value
+  // to `false` always — which silently disabled the daemon login leg
+  // (the `if (opts.tunnel)` below never ran). See the commander docs on
+  // "negatable boolean options".
   .option(
     "--no-tunnel",
-    "Skip authenticating the tunnel daemon, even if it is installed",
-    false
+    "Skip authenticating the tunnel daemon, even if it is installed"
   )
   .option(
     "--no-browser",
-    "Print the login URL instead of opening the browser (tunnel daemon flow)",
-    false
+    "Print the login URL instead of opening the browser (tunnel daemon flow)"
   )
   .action(async (opts: { tunnel: boolean; browser: boolean }) => {
     const apiUrl = getApiUrl();
