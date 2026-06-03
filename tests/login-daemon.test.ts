@@ -21,11 +21,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import { loginDaemon } from "../src/commands/tunnel.ts";
+import { DEFAULT_TOKEN_PATH } from "../src/tunnel/socket-path.ts";
 
 let tmp: string;
 const savedSocket = process.env.HSH_TUNNELD_SOCKET;
@@ -44,30 +45,61 @@ afterEach(() => {
 });
 
 describe("loginDaemon optional contract", () => {
-  test("genuinely absent daemon (no socket) → silent skip, returns true", async () => {
-    // Point at a socket path that does not exist on disk.
-    process.env.HSH_TUNNELD_SOCKET = join(tmp, "does-not-exist.sock");
-    delete process.env.HSH_TUNNELD_TOKEN_FILE;
+  test("daemon present (readable token) but login unusable → returns false, no silent skip", async () => {
+    // A readable control token is the 'daemon is installed here' signal
+    // that daemonLooksInstalled() keys on — mirroring connect(). With a
+    // token present, connect() succeeds, then client.config() fails
+    // (nothing is actually listening on the socket), and the optional
+    // path must WARN + return false rather than skip silently. This is
+    // the exact regression: on the affected host the socket existsSync
+    // was false for a live daemon, so the old check skipped silently.
+    const sockPath = join(tmp, "hsh.sock");
+    const tokPath = join(tmp, "control-token");
+    writeFileSync(sockPath, "");
+    writeFileSync(tokPath, "test-control-token");
+    process.env.HSH_TUNNELD_SOCKET = sockPath;
+    process.env.HSH_TUNNELD_TOKEN_FILE = tokPath;
 
     const ok = await loginDaemon({ browser: false, timeout: 1, optional: true });
-    // Absent daemon must NOT fail `hsh login`.
-    expect(ok).toBe(true);
+    expect(ok).toBe(false);
   });
 
-  test("installed daemon we can't authenticate against → returns false (no silent skip)", async () => {
-    // Create a real file at the socket path so resolveSocketPath reports
-    // exists=true (daemon "present"), but provide no readable control
-    // token so connect() throws — the exact "present but unusable" case
-    // that previously skipped silently.
+  test("daemon socket pointed at by env but unusable → returns false (env = user expects a daemon)", async () => {
+    // An explicit HSH_TUNNELD_SOCKET override means the user expects a
+    // daemon; even with no readable token we must surface the failure,
+    // never skip silently.
     const sockPath = join(tmp, "hsh.sock");
     writeFileSync(sockPath, "");
     process.env.HSH_TUNNELD_SOCKET = sockPath;
-    // Token file points at a missing path → connect() throws no-token.
     process.env.HSH_TUNNELD_TOKEN_FILE = join(tmp, "missing-token");
 
     const ok = await loginDaemon({ browser: false, timeout: 1, optional: true });
-    // Present-but-unusable must surface as a failure so the caller
-    // exits non-zero and the user knows to run `hsh tunnel login`.
+    expect(ok).toBe(false);
+  });
+
+  test("genuinely absent daemon (no env, no default token) → silent skip, returns true", async () => {
+    // No env overrides and (on the test host) no daemon installed at the
+    // platform default path → daemonLooksInstalled() is false → the
+    // optional leg must skip silently and NOT fail `hsh login`.
+    delete process.env.HSH_TUNNELD_SOCKET;
+    delete process.env.HSH_TUNNELD_TOKEN_FILE;
+
+    // Guard: if this box actually has a daemon installed at the default
+    // path, the premise doesn't hold — skip rather than report a false
+    // failure.
+    if (existsSync(DEFAULT_TOKEN_PATH.unix)) return;
+
+    const ok = await loginDaemon({ browser: false, timeout: 1, optional: true });
+    expect(ok).toBe(true);
+  });
+
+  test("non-optional mode always returns false on an unusable daemon", async () => {
+    // `hsh tunnel login` (optional=false): every failure is hard.
+    process.env.HSH_TUNNELD_SOCKET = join(tmp, "hsh.sock");
+    writeFileSync(process.env.HSH_TUNNELD_SOCKET, "");
+    process.env.HSH_TUNNELD_TOKEN_FILE = join(tmp, "missing-token");
+
+    const ok = await loginDaemon({ browser: false, timeout: 1, optional: false });
     expect(ok).toBe(false);
   });
 });

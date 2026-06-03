@@ -305,6 +305,36 @@ function errMessage(err: unknown): string {
 }
 
 /**
+ * Best-effort "is the tunnel daemon installed on this machine?" probe,
+ * used only to decide whether the optional daemon leg of `hsh login`
+ * may skip silently.
+ *
+ * It mirrors how TunnelClient.connect() decides reachability rather
+ * than stat-ing the unix socket: a readable control token is the
+ * reliable signal that the daemon (or its installer) has run here. We
+ * also accept a present token FILE even if unreadable (permission
+ * denied → user not in the `hsh` group yet) and an env-pointed socket,
+ * because all of those mean "the daemon exists; we just can't use it" —
+ * which must surface a warning, never a silent skip.
+ *
+ * Deliberately does NOT rely on existsSync of the socket path: on some
+ * hosts that returned false for a live daemon, which silently swallowed
+ * the daemon login.
+ */
+function daemonLooksInstalled(): boolean {
+  // A readable token is the strongest signal (connect() would succeed).
+  if (readControlToken()) return true;
+  // Token file present but unreadable, or pointed at by an env override:
+  // the daemon exists, we just can't read its token (perms).
+  const tok = resolveTokenPath();
+  if (tok.exists || tok.fromEnv) return true;
+  // Socket path explicitly overridden via env → user expects a daemon.
+  const sock = resolveSocketPath();
+  if (sock.fromEnv || sock.exists) return true;
+  return false;
+}
+
+/**
  * Heuristic: does the daemon's last_error indicate the saved token was
  * rejected by the gateway (as opposed to a network/DNS/route failure)?
  *
@@ -335,21 +365,29 @@ export async function loginDaemon(opts: {
   // The `optional` (best-effort) contract distinguishes two very
   // different "daemon not usable" situations:
   //
-  //   - Genuinely ABSENT: no IPC socket on disk → the daemon isn't
-  //     installed/running. Skipping silently is correct; a tunnel-less
-  //     setup must not see noise from `hsh login`.
+  //   - Genuinely ABSENT: the daemon isn't installed/running. Skipping
+  //     silently is correct; a tunnel-less setup must not see noise
+  //     from `hsh login`.
   //
-  //   - Present but UNREACHABLE or its login fails: the socket exists
-  //     (daemon installed) but we can't read its control token, can't
-  //     connect, or the daemon-side login errors. Skipping silently
-  //     here is the bug that let `hsh login` leave the daemon on a
-  //     stale/expired token while reporting success — so we WARN and
-  //     fail loudly, pointing the user at `hsh tunnel login`.
+  //   - Present but UNREACHABLE or its login fails: the daemon is
+  //     installed but we can't reach it, it's unconfigured, or its
+  //     login errors. Skipping silently here is the bug that let
+  //     `hsh login` leave the daemon on a stale/expired token while
+  //     reporting success — so we WARN and fail loudly, pointing the
+  //     user at `hsh tunnel login`.
   //
-  // The discriminator is whether the socket file exists.
-  const daemonPresent = resolveSocketPath().exists;
+  // The discriminator is `daemonLooksInstalled()`, which matches how
+  // TunnelClient.connect() itself decides reachability: a readable
+  // control token (the installer writes it alongside the socket) is the
+  // reliable "the daemon exists on this box" signal. A bare
+  // existsSync() on the unix SOCKET is NOT reliable — that earlier check
+  // was the bug: on this user's host the socket stat returned false even
+  // though the daemon was running (status worked), so the daemon leg of
+  // `hsh login` skipped silently. The token-based probe is consistent
+  // with connect()/status.
+  const present = daemonLooksInstalled();
   const skipOrFail = (reason: string): boolean => {
-    if (opts.optional && !daemonPresent) {
+    if (opts.optional && !present) {
       // Truly not installed — silent best-effort skip.
       return true;
     }
