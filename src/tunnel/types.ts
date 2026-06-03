@@ -137,6 +137,16 @@ export interface TunnelDownResponse {
 }
 
 /**
+ * Returned by POST /v1/connections/refresh. `running` is false when the
+ * tunnel was down at refresh time (the call was a no-op); `count` is the
+ * number of active connections after the refresh.
+ */
+export interface RefreshConnectionsResponse {
+  running: boolean;
+  count: number;
+}
+
+/**
  * Canonical JSON error body returned by every non-2xx response from
  * the control plane. The `code` field is the machine-readable identifier
  * — UIs should branch on it rather than string-matching `error`.

@@ -114,3 +114,23 @@ describe("TunnelClient.down", () => {
     expect(resp.already_down).toBe(true);
   });
 });
+
+describe("TunnelClient.refreshConnections", () => {
+  test("POSTs /v1/connections/refresh and returns the parsed response", async () => {
+    const getReq = stubFetch(200, { running: true, count: 4 });
+    const resp = await newClient().refreshConnections();
+
+    expect(resp.running).toBe(true);
+    expect(resp.count).toBe(4);
+    const { url, init } = getReq();
+    expect(url).toBe("http://hsh-tunneld/v1/connections/refresh");
+    expect(init.method).toBe("POST");
+  });
+
+  test("reports running=false when the tunnel is down (no-op)", async () => {
+    stubFetch(200, { running: false, count: 0 });
+    const resp = await newClient().refreshConnections();
+    expect(resp.running).toBe(false);
+    expect(resp.count).toBe(0);
+  });
+});

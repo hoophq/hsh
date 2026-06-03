@@ -23,6 +23,7 @@ import type {
   LoginPollResponse,
   LoginStartResponse,
   ReconnectResponse,
+  RefreshConnectionsResponse,
   StatusResponse,
   TunnelDownResponse,
   TunnelUpResponse,
@@ -197,6 +198,14 @@ export class TunnelClient {
   /** Tear the tunnel down while keeping the daemon logged in. */
   down(): Promise<TunnelDownResponse> {
     return this.do<TunnelDownResponse>("POST", "/v1/tunnel/down");
+  }
+
+  /**
+   * Re-fetch and reconcile the connection list now. No-op (running:
+   * false) when the tunnel is down.
+   */
+  refreshConnections(): Promise<RefreshConnectionsResponse> {
+    return this.do<RefreshConnectionsResponse>("POST", "/v1/connections/refresh");
   }
 
   // ----- transport -----

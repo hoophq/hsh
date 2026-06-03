@@ -9,6 +9,7 @@
  *
  *   - status        Show daemon running/logged-in state.
  *   - connections   List the *.hoop names the daemon is serving.
+ *   - refresh       Re-fetch the connection list from the gateway now.
  *   - up            Bring the tunnel netstack online (no re-auth).
  *   - down          Take the tunnel netstack offline, stay logged in.
  *   - login         OAuth or local-auth flow against the gateway, with
@@ -128,6 +129,42 @@ const connectionsSub = new Command("connections")
       }
       renderConnections(conns);
     } catch (err) {
+      renderApiError(err);
+      process.exitCode = 1;
+    }
+  });
+
+// ----------------------------------------------------------------------
+// hsh tunnel refresh
+// ----------------------------------------------------------------------
+
+const refreshSub = new Command("refresh")
+  .description("Re-fetch the connection list from the gateway now")
+  .action(async () => {
+    let client: TunnelClient;
+    try {
+      client = TunnelClient.connect();
+    } catch (err) {
+      renderUnavailable(err);
+      process.exitCode = 1;
+      return;
+    }
+
+    const spin = spinner("Refreshing connections...");
+    try {
+      const resp = await client.refreshConnections();
+      if (!resp.running) {
+        spin.stop();
+        info("Tunnel is down — nothing to refresh.");
+        info("Bring it up first:  hsh tunnel up");
+        return;
+      }
+      spin.succeed(
+        `Connections refreshed — ${resp.count} active.`
+      );
+      info("Run `hsh tunnel connections` to list them.");
+    } catch (err) {
+      spin.stop();
       renderApiError(err);
       process.exitCode = 1;
     }
@@ -689,6 +726,7 @@ export const tunnelCommand = new Command("tunnel")
   .description("Control the hsh-tunneld daemon (local tunnel for *.hoop hosts)")
   .addCommand(statusSub)
   .addCommand(connectionsSub)
+  .addCommand(refreshSub)
   .addCommand(upSub)
   .addCommand(downSub)
   .addCommand(loginSub)
