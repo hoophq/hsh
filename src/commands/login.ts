@@ -31,9 +31,16 @@ export const loginCommand = new Command("login")
     // Step 2: best-effort daemon login. The hsh-tunneld daemon owns its
     // own token (it does its own gateway round-trip via IPC — we never
     // hand it the CLI's token, preserving the daemon-owns-token trust
-    // model). If the daemon isn't installed/running/configured this is
-    // a silent no-op, so a tunnel-less setup sees no change in behavior.
+    // model).
+    //
+    // If the daemon is genuinely not installed this is a silent no-op.
+    // But if the daemon IS installed and we fail to update its token
+    // (unreachable, unconfigured, login error), loginDaemon returns
+    // false and has already warned the user — we propagate a non-zero
+    // exit so the failure is visible in scripts and shells. The CLI
+    // login itself already succeeded, so this only flags the daemon leg.
     if (opts.tunnel) {
-      await loginDaemon({ browser: opts.browser, timeout: 180, optional: true });
+      const ok = await loginDaemon({ browser: opts.browser, timeout: 180, optional: true });
+      if (!ok) process.exitCode = 1;
     }
   });

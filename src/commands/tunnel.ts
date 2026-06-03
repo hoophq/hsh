@@ -98,6 +98,18 @@ const statusSub = new Command("status")
         ...(s.last_error ? { "Last error": chalk.red(s.last_error) } : {}),
       });
       console.log();
+
+      // The daemon reports "authenticated" whenever it merely HOLDS a
+      // token — it can't know the token is valid until it dials the
+      // gateway. When that dial 401s (expired/rejected token) the only
+      // signal is a buried last_error string. Detect it and surface a
+      // concrete next step, otherwise the user sees "authenticated" +
+      // an opaque "401 Unauthorized" and has no idea the fix is to log
+      // in again.
+      if (isAuthError(s.last_error)) {
+        warn("The daemon's saved login has expired or was rejected by the gateway.");
+        info("Re-authenticate the daemon with:  hsh tunnel login");
+      }
     } catch (err) {
       renderApiError(err);
       process.exitCode = 1;
@@ -263,34 +275,96 @@ const loginSub = new Command("login")
  * auth method and run the matching OIDC or local-auth path, then report
  * the resulting tunnel state.
  *
- * `optional` controls the contract for the "daemon not usable" cases
- * (not installed, not running, no api_url configured):
+ * `optional` controls the contract for the "daemon not usable" cases:
  *
- *   - optional=false (interactive `hsh tunnel login`): these are hard
- *     errors — the user explicitly targeted the daemon, so we tell them
- *     exactly what to fix and return false.
+ *   - optional=false (interactive `hsh tunnel login`): every failure is
+ *     a hard error — the user explicitly targeted the daemon, so we
+ *     tell them exactly what to fix and return false.
  *
  *   - optional=true  (best-effort follow-up from the unified
- *     `hsh login`): these are silently skipped and return true. The
- *     user asked to log the *CLI* in; the daemon is a bonus, not a
- *     requirement, and a missing daemon must not fail `hsh login`.
+ *     `hsh login`): we ONLY skip silently when the daemon is genuinely
+ *     absent (no IPC socket on disk). When the daemon is installed but
+ *     unreachable, unconfigured, or its login fails, we WARN and return
+ *     false — silently swallowing those cases was the bug that left the
+ *     daemon on a stale/expired token while `hsh login` claimed success.
  *
- * Returns true when the daemon login succeeded OR was legitimately
- * skipped (optional=true), false on a real failure.
+ * Returns true only when the daemon login actually succeeded OR the
+ * daemon is genuinely absent (optional=true). Returns false on any real
+ * failure so the caller can set a non-zero exit code.
  */
+/** Human-readable reason from a TunnelUnavailableError (or any error). */
+function unavailableReason(err: unknown): string {
+  if (err instanceof TunnelUnavailableError) {
+    return `${err.reason} (${err.message})`;
+  }
+  return errMessage(err);
+}
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Heuristic: does the daemon's last_error indicate the saved token was
+ * rejected by the gateway (as opposed to a network/DNS/route failure)?
+ *
+ * The daemon surfaces gateway HTTP failures verbatim in last_error
+ * (e.g. "bring up: fetch serverinfo: GET .../api/serverinfo returned
+ * 401 Unauthorized: {...access denied...}"). We match on the canonical
+ * auth signals — a 401 status or the gateway's "access denied" body —
+ * so `hsh tunnel status` can point the user at `hsh tunnel login`
+ * instead of leaving them staring at a raw HTTP error.
+ */
+export function isAuthError(lastError: string | undefined): boolean {
+  if (!lastError) return false;
+  const e = lastError.toLowerCase();
+  return (
+    e.includes("401") ||
+    e.includes("unauthorized") ||
+    e.includes("access denied") ||
+    e.includes("token is expired") ||
+    e.includes("token expired")
+  );
+}
+
 export async function loginDaemon(opts: {
   browser: boolean;
   timeout: number;
   optional: boolean;
 }): Promise<boolean> {
+  // The `optional` (best-effort) contract distinguishes two very
+  // different "daemon not usable" situations:
+  //
+  //   - Genuinely ABSENT: no IPC socket on disk → the daemon isn't
+  //     installed/running. Skipping silently is correct; a tunnel-less
+  //     setup must not see noise from `hsh login`.
+  //
+  //   - Present but UNREACHABLE or its login fails: the socket exists
+  //     (daemon installed) but we can't read its control token, can't
+  //     connect, or the daemon-side login errors. Skipping silently
+  //     here is the bug that let `hsh login` leave the daemon on a
+  //     stale/expired token while reporting success — so we WARN and
+  //     fail loudly, pointing the user at `hsh tunnel login`.
+  //
+  // The discriminator is whether the socket file exists.
+  const daemonPresent = resolveSocketPath().exists;
+  const skipOrFail = (reason: string): boolean => {
+    if (opts.optional && !daemonPresent) {
+      // Truly not installed — silent best-effort skip.
+      return true;
+    }
+    warn(`Tunnel daemon login was not completed: ${reason}`);
+    info("Your CLI is logged in, but the tunnel daemon still holds its previous token.");
+    info("Run `hsh tunnel login` to update the daemon.");
+    return false;
+  };
+
   let client: TunnelClient;
   try {
     client = TunnelClient.connect();
   } catch (err) {
     if (opts.optional) {
-      // Daemon not installed/running — skip silently. The CLI login
-      // already succeeded; the tunnel is simply not part of this setup.
-      return true;
+      return skipOrFail(unavailableReason(err));
     }
     renderUnavailable(err);
     return false;
@@ -304,11 +378,12 @@ export async function loginDaemon(opts: {
     const cfg = await client.config();
     if (!cfg.api_url) {
       if (opts.optional) {
-        // Best-effort: nudge but don't fail. The user can wire the
-        // daemon up later with `hsh tunnel config set api-url`.
-        info("Tunnel daemon detected but not configured — skipping tunnel login.");
-        info("Configure it with: hsh tunnel config set api-url <url>");
-        return true;
+        // Daemon is reachable but unconfigured. This is a real
+        // "couldn't update the daemon" case, not an absent daemon, so
+        // surface it rather than swallow it.
+        warn("Tunnel daemon is installed but has no api_url configured.");
+        info("Configure it with: hsh tunnel config set api-url <url>, then run hsh tunnel login.");
+        return false;
       }
       error("Daemon has no api_url configured.");
       info("Set it first: hsh tunnel config set api-url <url>");
@@ -316,7 +391,7 @@ export async function loginDaemon(opts: {
     }
     apiUrl = cfg.api_url;
   } catch (err) {
-    if (opts.optional) return true;
+    if (opts.optional) return skipOrFail(errMessage(err));
     renderApiError(err);
     return false;
   }
@@ -329,7 +404,7 @@ export async function loginDaemon(opts: {
   try {
     serverInfo = await getPublicServerInfo(apiUrl);
   } catch (err) {
-    if (opts.optional) return true;
+    if (opts.optional) return skipOrFail(errMessage(err));
     error(`Could not detect auth method: ${(err as Error).message}`);
     info(`Verify the api-url: hsh tunnel config get`);
     return false;
