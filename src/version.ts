@@ -8,4 +8,4 @@
  * The format is semver without a leading 'v' so it can be compared
  * lexicographically by `compareSemver()` in src/update/version.ts.
  */
-export const VERSION = "0.3.1";
+export const VERSION = "0.3.2";
