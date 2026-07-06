@@ -1,14 +1,40 @@
 import { spawnSync } from "child_process";
 import type { KeychainBackend } from "./interface.ts";
 
-const SERVICE = "hsh";
-const ACCOUNT = "token";
+const DEFAULT_SERVICE = "hsh";
+const DEFAULT_ACCOUNT = "token";
 
 /**
  * Bounded timeout for all keychain CLI calls (ms).
  * A wedged Keychain daemon must not block the user's shell indefinitely.
  */
 const TIMEOUT_MS = 5000;
+
+/**
+ * Quote a value for a `security -i` command line.
+ *
+ * Inside double quotes security's tokenizer honours backslash escapes:
+ * `\\` → `\` and `\"` → `"` (verified empirically against the security
+ * CLI on macOS 15).  The interactive protocol is line-oriented, so
+ * values containing control characters cannot be represented — callers
+ * must reject them first (see assertRepresentable).
+ */
+function quoteForSecurityI(value: string): string {
+  return '"' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
+/**
+ * The `security -i` protocol is line-oriented: a token containing a
+ * newline (or any other control character) cannot be transported.  Real
+ * tokens are JWTs (base64url + dots) so this never fires in practice —
+ * it exists to turn a silent protocol corruption into a loud error.
+ */
+function assertRepresentable(value: string): void {
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(value)) {
+    throw new Error("macOS Keychain: token contains control characters and cannot be stored");
+  }
+}
 
 /**
  * macOS Keychain backend — delegates to the `security` CLI that ships with
@@ -19,44 +45,46 @@ const TIMEOUT_MS = 5000;
  *   account  = "token"
  *   kind     = "application password"
  *
- * Token value is passed via stdin (not -w on the command line) to avoid
- * leaking it to other local processes via `ps` / Activity Monitor while
- * `security` is running.
+ * The token value is passed to `security` in **interactive mode**
+ * (`security -i`) with the full command written to stdin.  This keeps the
+ * secret off the process argv, where it would otherwise be readable by any
+ * same-user process via `ps` for the lifetime of the (brief) security
+ * invocation.  Reads still use plain argv (`find-generic-password -w`)
+ * because no secret material appears on the command line for reads.
  *
- * The security CLI is synchronous by nature; we wrap the calls in
- * spawnSync so callers can `await` the backend uniformly without
- * actually needing an event loop turn.
+ * `security -i` exits with the status of the executed command (verified:
+ * 0 on success, 44 on item-not-found), so error handling is identical to
+ * direct invocation.
  */
 export class MacOSKeychain implements KeychainBackend {
   readonly name = "macOS Keychain";
 
+  /**
+   * Service/account are injectable for integration tests so they can
+   * operate on a scratch keychain item instead of the real hsh token.
+   * Production code always uses the defaults.
+   */
+  constructor(
+    private readonly service: string = DEFAULT_SERVICE,
+    private readonly account: string = DEFAULT_ACCOUNT,
+  ) {}
+
   async set(value: string): Promise<void> {
-    // Use -U (update-or-create) without -w so the token is NOT on the
-    // command line.  Instead we rely on `security` reading the password
-    // from stdin when -w is absent and stdin is a pipe.
-    //
-    // Note: `security add-generic-password` with -U updates an existing
-    // item in place — no destructive delete-then-add, so a failure leaves
-    // the previous token intact.
-    const result = spawnSync("security", [
+    assertRepresentable(value);
+
+    // -U updates an existing item in place — no destructive
+    // delete-then-add, so a failure leaves the previous token intact.
+    const command = [
       "add-generic-password",
-      "-s", SERVICE,
-      "-a", ACCOUNT,
-      "-U", // update if item already exists
-      // Password is read from stdin (omitting -w triggers interactive prompt
-      // when stdin is a TTY; when stdin is a pipe, security reads from it).
-      "-w", value,
-    ], {
-      // Even though we pass -w here, on macOS security(1) reads
-      // the password from stdin when stdin is a non-TTY pipe AND -w
-      // is not provided.  However, the safest cross-version approach
-      // is to pass the value inline only when we have confirmed that
-      // the alternative (stdin) would work.  In practice, on macOS the
-      // argv is not world-readable the way /proc/*/cmdline is on Linux
-      // (the kernel zeroes it after exec on Apple Silicon / modern macOS),
-      // so -w inline is acceptable here.  We keep this comment to record
-      // the trade-off decision.
-      stdio: "pipe",
+      "-s", quoteForSecurityI(this.service),
+      "-a", quoteForSecurityI(this.account),
+      "-U",
+      "-w", quoteForSecurityI(value),
+    ].join(" ") + "\n";
+
+    const result = spawnSync("security", ["-i"], {
+      input: command,
+      stdio: ["pipe", "pipe", "pipe"],
       timeout: TIMEOUT_MS,
     });
 
@@ -73,8 +101,8 @@ export class MacOSKeychain implements KeychainBackend {
   async get(): Promise<string | null> {
     const result = spawnSync("security", [
       "find-generic-password",
-      "-s", SERVICE,
-      "-a", ACCOUNT,
+      "-s", this.service,
+      "-a", this.account,
       "-w", // print password to stdout only
     ], { stdio: "pipe", timeout: TIMEOUT_MS });
 
@@ -94,8 +122,8 @@ export class MacOSKeychain implements KeychainBackend {
   async delete(): Promise<void> {
     spawnSync("security", [
       "delete-generic-password",
-      "-s", SERVICE,
-      "-a", ACCOUNT,
+      "-s", this.service,
+      "-a", this.account,
     ], { stdio: "pipe", timeout: TIMEOUT_MS });
     // Ignore exit code — non-zero just means it wasn't there.
   }

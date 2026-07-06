@@ -264,3 +264,60 @@ describe("auth/store via FileKeychain", () => {
     expect(tok).toBe(legacyToken);
   });
 });
+
+// ---------------------------------------------------------------------------
+// MacOSKeychain — real Keychain integration (darwin only)
+// ---------------------------------------------------------------------------
+//
+// Exercises the real `security -i` path against the logged-in user's
+// keychain using a scratch service name, so the actual hsh token slot is
+// never touched. Skipped off-macOS. On CI macOS runners the default
+// keychain is unlocked, so these run there too.
+
+import { MacOSKeychain } from "../src/keychain/macos.ts";
+
+const darwinOnly = process.platform === "darwin" ? describe : describe.skip;
+
+darwinOnly("MacOSKeychain (real keychain, scratch service)", () => {
+  // Unique per-run service name so parallel/aborted runs never collide.
+  const scratchService = `hsh-test-${process.pid}-${Date.now()}`;
+  const kc = new MacOSKeychain(scratchService, "token");
+
+  afterEach(async () => {
+    await kc.delete();
+  });
+
+  test("set/get round-trip via security -i (token off argv)", async () => {
+    await kc.set("scratch-token-value");
+    expect(await kc.get()).toBe("scratch-token-value");
+  });
+
+  test("set overwrites existing value in place (-U)", async () => {
+    await kc.set("first");
+    await kc.set("second");
+    expect(await kc.get()).toBe("second");
+  });
+
+  test("values needing quoting survive the -i protocol", async () => {
+    const tricky = 'sp ace "quoted" back\\slash $dollar `tick`';
+    await kc.set(tricky);
+    expect(await kc.get()).toBe(tricky);
+  });
+
+  test("get returns null for absent item", async () => {
+    expect(await kc.get()).toBeNull();
+  });
+
+  test("delete is idempotent", async () => {
+    await kc.set("x");
+    await kc.delete();
+    await kc.delete(); // second delete must not throw
+    expect(await kc.get()).toBeNull();
+  });
+
+  test("control characters are rejected before touching the keychain", async () => {
+    await expect(kc.set("line1\nline2")).rejects.toThrow(/control characters/);
+    // Nothing must have been stored.
+    expect(await kc.get()).toBeNull();
+  });
+});

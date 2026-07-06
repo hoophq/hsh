@@ -215,7 +215,36 @@ All configuration lives in `~/.hsh/`:
 | File | Purpose |
 |---|---|
 | `~/.hsh/config.json` | API URL and settings |
-| `~/.hsh/auth.json` | JWT token (permissions: `600`) |
+| `~/.hsh/auth.json` | Session metadata: expiry, email (permissions: `600`) |
+| `~/.hsh/token` | Token fallback file, only when no OS keychain is available (permissions: `600`) |
+
+### Token storage
+
+The session token itself is stored in the OS keychain, not on disk:
+
+| Platform | Backend |
+|---|---|
+| macOS | Keychain (via the built-in `security` CLI) |
+| Linux (desktop) | Secret Service / libsecret (via `secret-tool`, requires a running daemon such as gnome-keyring) |
+| Linux (headless/CI), Windows, others | Plaintext fallback file `~/.hsh/token`, mode `600` |
+
+The backend is auto-detected. Override it with the `HSH_KEYCHAIN_BACKEND`
+environment variable:
+
+```bash
+HSH_KEYCHAIN_BACKEND=file       # force the fallback file (e.g. CI)
+HSH_KEYCHAIN_BACKEND=macos      # force macOS Keychain (darwin only)
+HSH_KEYCHAIN_BACKEND=libsecret  # force libsecret (linux only)
+```
+
+Note: the fallback file is deliberately **not** encrypted — an encryption
+key stored next to the file would add no real protection. `600`
+permissions are the appropriate control for keychain-less environments.
+
+Older hsh versions stored the token inside `auth.json`; it is migrated to
+the keychain automatically on first use. If you downgrade hsh after the
+migration, the old version will not find the token and you will need to
+`hsh login` again.
 
 ## Building from source
 
