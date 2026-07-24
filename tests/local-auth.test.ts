@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { performLocalAuthLogin } from "../src/auth/local.ts";
+import { _resetKeychainCache } from "../src/keychain/auto.ts";
 
 /**
  * Wire-contract + UX tests for local-auth login.
@@ -26,6 +27,7 @@ import { PassThrough } from "stream";
 
 let tempHome: string;
 let originalHome: string | undefined;
+let originalKeychainBackend: string | undefined;
 let originalExit: typeof process.exit;
 let originalStdin: typeof process.stdin;
 
@@ -47,6 +49,10 @@ beforeAll(() => {
   tempHome = mkdtempSync(join(tmpdir(), "hsh-local-auth-test-"));
   originalHome = process.env.HSH_HOME;
   process.env.HSH_HOME = tempHome;
+  // Force file backend so tests don't touch the real OS keychain.
+  originalKeychainBackend = process.env.HSH_KEYCHAIN_BACKEND;
+  process.env.HSH_KEYCHAIN_BACKEND = "file";
+  _resetKeychainCache();
   originalStdin = process.stdin;
 
   // Stub process.exit so the test can observe exit codes instead of
@@ -64,6 +70,12 @@ afterAll(() => {
   } else {
     delete process.env.HSH_HOME;
   }
+  if (originalKeychainBackend !== undefined) {
+    process.env.HSH_KEYCHAIN_BACKEND = originalKeychainBackend;
+  } else {
+    delete process.env.HSH_KEYCHAIN_BACKEND;
+  }
+  _resetKeychainCache();
   Object.defineProperty(process, "stdin", {
     value: originalStdin,
     configurable: true,
@@ -72,12 +84,9 @@ afterAll(() => {
 });
 
 afterEach(() => {
-  // Drop any auth.json from the previous test so each starts clean.
-  try {
-    rmSync(join(tempHome, "auth.json"), { force: true });
-  } catch {
-    // ignore
-  }
+  // Drop persisted token state from the previous test so each starts clean.
+  try { rmSync(join(tempHome, "auth.json"), { force: true }); } catch {}
+  try { rmSync(join(tempHome, "token"), { force: true }); } catch {}
 });
 
 function stubStdin(): PassThrough {
@@ -143,13 +152,17 @@ describe("performLocalAuthLogin (ENG-362)", () => {
         password: "hunter2",
       });
 
-      // auth.json was written with the jwt + decoded email + iso expiry.
-      const auth = JSON.parse(
+      // Token is stored in the keychain (file backend in tests: ~/.hsh/token).
+      // auth.json holds only metadata — no token field.
+      const storedToken = readFileSync(join(tempHome, "token"), "utf-8").trim();
+      expect(storedToken).toBe(jwt);
+
+      const meta = JSON.parse(
         readFileSync(join(tempHome, "auth.json"), "utf-8"),
-      ) as { token: string; email?: string; expiresAt: string };
-      expect(auth.token).toBe(jwt);
-      expect(auth.email).toBe("alice@example.com");
-      expect(new Date(auth.expiresAt).getTime()).toBeGreaterThan(Date.now());
+      ) as { token?: string; email?: string; expiresAt: string };
+      expect(meta.token).toBeUndefined();
+      expect(meta.email).toBe("alice@example.com");
+      expect(new Date(meta.expiresAt).getTime()).toBeGreaterThan(Date.now());
     } finally {
       server.stop();
     }
