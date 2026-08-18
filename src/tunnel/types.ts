@@ -52,12 +52,27 @@ export interface Connection {
    * upstream port.
    */
   expected_port: number;
+  /**
+   * Fixed credentials a native client presents to reach this connection
+   * through the tunnel.
+   *
+   * These are NOT the connection's real credentials and not the gateway's
+   * rotating token: the agent's protocol proxy terminates the client's
+   * authentication locally and re-authenticates upstream with the secrets
+   * stored on the connection. They are stable, safe to display, and only
+   * usable through the local daemon.
+   *
+   * Empty for subtypes that authenticate out of band (`tcp`, whose upstream
+   * protocol hoop does not parse).
+   */
+  username: string;
+  password: string;
 }
 
 /**
  * Subtypes the daemon will tunnel. Anything else (`ssh`, `kubernetes`,
- * `httpproxy`, `rdp`, ...) is filtered out by tunnel/client/connections.go
- * and never appears in this list.
+ * `rdp`, ...) is filtered out by tunnel/client/connections.go and never
+ * appears in this list.
  */
 export type ConnectionSubtype =
   | "postgres"
@@ -65,7 +80,8 @@ export type ConnectionSubtype =
   | "mssql"
   | "mongodb"
   | "oracledb"
-  | "tcp";
+  | "tcp"
+  | "httpproxy";
 
 export interface ConnectionsResponse {
   connections: Connection[];
