@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { program } from "commander";
 import { loginCommand } from "./commands/login.ts";
+import { setupCommand } from "./commands/setup.ts";
 import { logoutCommand } from "./commands/logout.ts";
 import { statusCommand } from "./commands/status.ts";
 import { configCommand } from "./commands/config.ts";
@@ -24,6 +25,7 @@ program
   .version(`${VERSION} (hsh-tunneld ${BUNDLED_DAEMON_VERSION})`);
 
 program.addCommand(loginCommand);
+program.addCommand(setupCommand);
 program.addCommand(logoutCommand);
 program.addCommand(statusCommand);
 program.addCommand(configCommand);
