@@ -63,7 +63,7 @@ export interface Connection {
    * usable through the local daemon.
    *
    * Empty for subtypes that authenticate out of band (`tcp`, whose upstream
-   * protocol hoop does not parse).
+   * protocol Hoop does not parse).
    */
   username: string;
   password: string;

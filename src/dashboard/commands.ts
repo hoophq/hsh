@@ -55,40 +55,58 @@ export interface CommandTemplateInput {
  */
 export function renderCommand(input: CommandTemplateInput): string {
   const host = `${input.name}.hoop`;
+  // A daemon older than the credentials field omits it entirely, and
+  // TunnelClient.connections() casts the raw JSON without validating, so
+  // these can be undefined at runtime despite the types. Interpolating that
+  // would print `-U undefined`, so fall back to the credential-free command
+  // for the subtype instead.
   const user = input.username;
   const pass = input.password;
+  const haveCreds = Boolean(user) && Boolean(pass);
+
   switch (input.subtype) {
     case "postgres":
       // psql has no password flag; PGPASSWORD is the only way to avoid an
-      // interactive prompt.
-      return `PGPASSWORD=${pass} psql -h ${host} -U ${user}`;
+      // interactive prompt. Without one, psql prompts — still usable.
+      return haveCreds
+        ? `PGPASSWORD=${pass} psql -h ${host} -U ${user}`
+        : `psql -h ${host}`;
 
     case "mysql":
-      // mysql takes the password glued to -p, with no space.
-      return `mysql -h ${host} -u ${user} -p${pass}`;
+      // mysql takes the password glued to -p, with no space. A bare -p
+      // prompts for it.
+      return haveCreds
+        ? `mysql -h ${host} -u ${user} -p${pass}`
+        : `mysql -h ${host} -p`;
 
     case "mssql":
       // sqlcmd is Microsoft's CLI; works on Linux + macOS + Windows.
-      return `sqlcmd -S ${host} -U ${user} -P ${pass}`;
+      return haveCreds
+        ? `sqlcmd -S ${host} -U ${user} -P ${pass}`
+        : `sqlcmd -S ${host}`;
 
     case "mongodb":
       // directConnection=true: the proxy fronts a single endpoint and does
       // not implement replica-set discovery, so a driver left to run its own
       // topology scan would try to dial the real cluster members by their
       // internal hostnames and fail.
-      return `mongosh "mongodb://${user}:${pass}@${host}/?directConnection=true"`;
+      return haveCreds
+        ? `mongosh "mongodb://${user}:${pass}@${host}/?directConnection=true"`
+        : `mongosh "mongodb://${host}/?directConnection=true"`;
 
     case "oracledb":
       // sqlplus's connect-string syntax needs the port spelled out.
-      return `sqlplus ${user}/${pass}@${host}:${input.expectedPort ?? 1521}`;
+      return haveCreds
+        ? `sqlplus ${user}/${pass}@${host}:${input.expectedPort ?? 1521}`
+        : `sqlplus @${host}:${input.expectedPort ?? 1521}`;
 
     case "httpproxy":
-      // Authentication rides headers the agent injects, and the tunnel has
+      // Authorization rides headers the agent injects, and the tunnel has
       // no certificate for *.hoop, so the scheme is plain http on port 80.
       return `curl http://${host}/`;
 
     case "tcp":
-      // An opaque user-defined upstream: hoop cannot know which client the
+      // An opaque user-defined upstream: Hoop cannot know which client the
       // user needs, and any credentials are their own.
       return `nc -v ${host} <port>`;
 

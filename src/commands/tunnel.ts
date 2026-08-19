@@ -793,9 +793,10 @@ function renderConnections(conns: Connection[]): void {
   console.log();
 
   // Only explain credentials when at least one connection actually has
-  // them; a list of `tcp` connections would otherwise advertise a login
-  // that does not exist.
-  if (conns.some((c) => c.username !== "")) {
+  // them; a list of `tcp` connections — or an older daemon that omits the
+  // fields entirely — would otherwise advertise a login that does not
+  // exist. Boolean() covers both "" and undefined.
+  if (conns.some((c) => Boolean(c.username) && Boolean(c.password))) {
     console.log(
       chalk.dim(
         "  Credentials above are fixed and local to this tunnel — not your database's."

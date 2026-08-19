@@ -276,7 +276,7 @@ describe("renderCommand: subtype coverage", () => {
     });
   }
 
-  // `tcp` is relayed verbatim: hoop injects no credentials, so advertising
+  // `tcp` is relayed verbatim: Hoop injects no credentials, so advertising
   // any would send the user down a dead end.
   test("tcp: carries no credentials", () => {
     const cmd = renderCommand({
@@ -288,4 +288,48 @@ describe("renderCommand: subtype coverage", () => {
     });
     expect(cmd).not.toContain("noop");
   });
+});
+
+describe("renderCommand: daemon without credentials", () => {
+  // A daemon older than the credentials field omits username/password from
+  // /v1/connections. TunnelClient casts the raw JSON without validating, so
+  // the fields are `undefined` at runtime despite the types. Rendering them
+  // produced "PGPASSWORD=undefined psql -U undefined".
+  const legacySubtypes = [
+    "postgres",
+    "mysql",
+    "mssql",
+    "mongodb",
+    "oracledb",
+  ] as const;
+
+  for (const subtype of legacySubtypes) {
+    test(`${subtype}: omitted credentials never render as undefined`, () => {
+      const cmd = renderCommand({
+        name: "demo",
+        subtype,
+        // Exactly what an older daemon yields after the JSON cast.
+        username: undefined as unknown as string,
+        password: undefined as unknown as string,
+        expectedPort: 1521,
+      });
+      expect(cmd).not.toContain("undefined");
+      expect(cmd).toContain("demo.hoop");
+      expect(cmd.length).toBeGreaterThan(0);
+    });
+
+    test(`${subtype}: empty credentials render a usable command`, () => {
+      const cmd = renderCommand({
+        name: "demo",
+        subtype,
+        username: "",
+        password: "",
+        expectedPort: 1521,
+      });
+      // No dangling flag with nothing after it (e.g. "-U " at end of line).
+      expect(cmd).not.toMatch(/(-U|-u|-P)\s*$/);
+      expect(cmd).not.toContain("://:@");
+      expect(cmd).toContain("demo.hoop");
+    });
+  }
 });
