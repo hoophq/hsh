@@ -279,12 +279,30 @@ export async function downloadDaemon(opts: {
  */
 export function runPrivilegedInstall(
   daemonPath: string,
+  expectedSha256: string | string[] = "",
   args: string[] = [],
 ): void {
   const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
-  const argv = [daemonPath, "install", ...args];
+  const installArgs = Array.isArray(expectedSha256) ? expectedSha256 : args;
+  const expected = Array.isArray(expectedSha256) ? "" : expectedSha256;
+  const argv = [daemonPath, "install", ...installArgs];
   const cmd = isRoot ? argv[0] : "sudo";
-  const cmdArgs = isRoot ? argv.slice(1) : ["--", ...argv];
+  const privilegedScript = [
+    'set -e',
+    'daemon=$1',
+    'expected=$2',
+    'chown root:root -- "$daemon"',
+    'chmod 0755 -- "$daemon"',
+    'if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum -- "$daemon" | awk \'{print $1}\');',
+    'elif command -v shasum >/dev/null 2>&1; then actual=$(shasum -a 256 -- "$daemon" | awk \'{print $1}\');',
+    'else echo "No SHA-256 utility available" >&2; rm -f -- "$daemon"; exit 1; fi',
+    'if [ "$actual" != "$expected" ]; then echo "Daemon checksum verification failed" >&2; rm -f -- "$daemon"; exit 1; fi',
+    'shift 2',
+    'exec "$daemon" install "$@"',
+  ].join(" ");
+  const cmdArgs = isRoot
+    ? argv.slice(1)
+    : ["--", "sh", "-c", privilegedScript, "hsh-tunneld-install", daemonPath, expected, ...installArgs];
 
   debug("tunnel.install", `spawning ${cmd} ${cmdArgs.join(" ")}`);
   // `env` is passed explicitly rather than inherited by default: Bun
@@ -382,7 +400,7 @@ export async function installDaemon(opts: {
 
   progress(`Verified ${downloaded.assetName} (sha256 ${downloaded.sha256})`);
   progress("Registering the daemon with your system service manager (sudo required)");
-  runPrivilegedInstall(downloaded.path, opts.installArgs);
+  runPrivilegedInstall(downloaded.path, downloaded.sha256, opts.installArgs);
 
   return {
     version,
