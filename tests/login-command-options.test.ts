@@ -46,6 +46,10 @@ describe("negatable --no-* options default to true (daemon leg enabled)", () => 
     expect(negatableDefault(loginCommand, "browser")).toBe(true);
   });
 
+  test("hsh login --no-setup defaults setup=true", () => {
+    expect(negatableDefault(loginCommand, "setup")).toBe(true);
+  });
+
   test("hsh logout --no-tunnel defaults tunnel=true", () => {
     expect(negatableDefault(logoutCommand, "tunnel")).toBe(true);
   });

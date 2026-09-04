@@ -69,37 +69,50 @@ curl -L -o hsh.tar.gz https://github.com/hoophq/hsh/releases/latest/download/hsh
 curl -L -o hsh.tar.gz https://github.com/hoophq/hsh/releases/latest/download/hsh-linux-arm64.tar.gz
 ```
 
-Then extract and install:
+Then extract and install the CLI:
 
 ```bash
 tar xzf hsh.tar.gz
 cd hsh-*/
-sudo install -m 0755 hsh /usr/local/bin/   # the CLI
-
-# Linux: registers hsh-tunneld as a systemd service
-./install.sh
-
-# macOS: registers hsh-tunneld as a LaunchDaemon
-sudo ./hsh-tunneld install
+sudo install -m 0755 hsh /usr/local/bin/
 ```
-
-On Linux the install script registers `hsh-tunneld` as a systemd service.
-On macOS run `sudo ./hsh-tunneld install` directly — it registers the
-daemon as a system-wide LaunchDaemon (the `install.sh` wrapper is
-currently Linux-only). Either way the installer adds you to the `hsh`
-group, which gates access to the daemon's control socket; open a new
-login session (or run `newgrp hsh`) for it to take effect.
 
 Windows: download `hsh-windows-x64.zip` (or `hsh-windows-arm64.zip`), unpack
 with Explorer or `Expand-Archive`, and copy `hsh.exe` somewhere on your PATH.
+The tunnel daemon has no Windows service support yet, so step 2 does not
+apply — the rest of `hsh` works without it.
 
-### 2. Configure
+### 2. Install the networking components
+
+```bash
+hsh setup
+```
+
+This downloads the matching `hsh-tunneld` daemon for your OS and
+architecture, verifies it against the release's `SHA256SUMS`, and
+registers it with your system service manager (systemd on Linux, a
+LaunchDaemon on macOS). `sudo` prompts for your password once.
+
+`hsh login` runs this automatically the first time, so `hsh setup` is
+only needed if you want to install the daemon up front, or to reinstall
+it later with `hsh setup --force`.
+
+The installer adds you to the `hsh` group, which gates access to the
+daemon's control socket. Group membership only applies to new login
+sessions, so open a new terminal (or run `newgrp hsh`) afterwards.
+
+Already have the release archive extracted? `sudo ./hsh-tunneld install`
+does the same registration on both Linux and macOS. The bundled
+`./install.sh` wrapper is a Linux-only convenience around it and refuses
+to run on macOS.
+
+### 3. Configure
 
 ```bash
 hsh config set api-url https://your-company.hoop.dev
 ```
 
-### 3. Authenticate
+### 4. Authenticate
 
 ```bash
 hsh login
@@ -107,7 +120,7 @@ hsh login
 
 Opens your browser for OAuth. Done.
 
-### 4. Activate shell plugins
+### 5. Activate shell plugins
 
 Add this single line to your shell profile:
 
