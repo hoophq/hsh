@@ -34,8 +34,6 @@
  * dep tree larger than the dashboard itself.
  */
 
-import { userInfo } from "os";
-
 import {
   TunnelApiError,
   TunnelClient,
@@ -60,22 +58,8 @@ const KNOWN_SUBTYPES: ConnectionSubtype[] = [
   "mongodb",
   "oracledb",
   "tcp",
+  "httpproxy",
 ];
-
-/**
- * Resolved shell-level username at server start. Baked into copy
- * commands as the default `-u` / `-U` value. Falls back to `<user>`
- * when the call fails (rare on Linux/macOS, more common on a CI
- * container running without /etc/passwd).
- */
-function currentUserName(): string {
-  try {
-    const u = userInfo();
-    return u.username || "<user>";
-  } catch {
-    return "<user>";
-  }
-}
 
 /**
  * Errors we expect to occur during normal operation. Mapped to
@@ -175,11 +159,9 @@ export interface ServerOptions {
   hostname: string;
   port: number;
   client: TunnelClient;
-  userName?: string;
 }
 
 export function buildServer(opts: ServerOptions) {
-  const userName = opts.userName ?? currentUserName();
   return {
     hostname: opts.hostname,
     port: opts.port,
@@ -236,6 +218,10 @@ export function buildServer(opts: ServerOptions) {
         }
 
         // /api/commands/:subtype?name=foo
+        //
+        // The subtype in the path is validated but the command is rendered
+        // from the daemon's own record for `name`: the template embeds that
+        // connection's fixed credentials, which only the daemon knows.
         const cmdMatch = /^\/api\/commands\/([^/?]+)$/.exec(url.pathname);
         if (cmdMatch && req.method === "GET") {
           const subtype = cmdMatch[1].toLowerCase();
@@ -250,10 +236,20 @@ export function buildServer(opts: ServerOptions) {
               message: "missing required query parameter: name",
             });
           }
+          const conn = (await opts.client.connections()).find(
+            (c) => c.name === name
+          );
+          if (!conn) {
+            return jsonResp(404, {
+              message: `unknown connection: ${name}`,
+            });
+          }
           const command = renderCommand({
-            name,
-            subtype: subtype as ConnectionSubtype,
-            userName,
+            name: conn.name,
+            subtype: conn.subtype,
+            username: conn.username,
+            password: conn.password,
+            expectedPort: conn.expected_port,
           });
           return jsonResp(200, { command });
         }

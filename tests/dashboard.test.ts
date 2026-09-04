@@ -38,6 +38,8 @@ function fakeClient(
         subtype: "postgres",
         virtual_ip: "fd00::1",
         expected_port: 5432,
+        username: "noop",
+        password: "noop",
       },
     ],
     loginStart: async () => ({
@@ -55,7 +57,6 @@ function makeServer(opts: Partial<Parameters<typeof buildServer>[0]> = {}) {
     hostname: "127.0.0.1",
     port: 0,
     client: opts.client ?? (fakeClient() as any),
-    userName: opts.userName ?? "alice",
   });
 }
 
@@ -184,16 +185,19 @@ describe("dashboard server: CSRF gate", () => {
 });
 
 describe("dashboard server: command rendering", () => {
-  test("GET /api/commands/postgres?name=foo -> renders psql", async () => {
-    const server = makeServer({ userName: "alice" });
+  test("GET /api/commands/postgres?name=test-pg -> psql with the daemon's credentials", async () => {
+    const server = makeServer();
     const resp = await server.fetch(
-      req("GET", "/api/commands/postgres?name=foo"),
+      req("GET", "/api/commands/postgres?name=test-pg"),
     );
     expect(resp.status).toBe(200);
-    const body = (await resp.json()) as any;
+    const body = (await resp.json()) as { command: string };
     expect(body.command).toContain("psql");
-    expect(body.command).toContain("foo.hoop");
-    expect(body.command).toContain("alice");
+    expect(body.command).toContain("test-pg.hoop");
+    // The credentials come from the daemon's record, never from the
+    // shell-level user the dashboard happens to run as.
+    expect(body.command).toContain("-U noop");
+    expect(body.command).toContain("PGPASSWORD=noop");
   });
 
   test("GET /api/commands/unknown -> 404", async () => {
@@ -207,6 +211,14 @@ describe("dashboard server: command rendering", () => {
     const resp = await server.fetch(req("GET", "/api/commands/mysql"));
     expect(resp.status).toBe(400);
   });
+
+  test("GET /api/commands for a connection the daemon does not serve -> 404", async () => {
+    const server = makeServer();
+    const resp = await server.fetch(
+      req("GET", "/api/commands/postgres?name=not-a-connection"),
+    );
+    expect(resp.status).toBe(404);
+  });
 });
 
 describe("renderCommand: subtype coverage", () => {
@@ -217,6 +229,7 @@ describe("renderCommand: subtype coverage", () => {
     "mongodb",
     "oracledb",
     "tcp",
+    "httpproxy",
   ] as const;
 
   for (const subtype of subtypes) {
@@ -224,22 +237,99 @@ describe("renderCommand: subtype coverage", () => {
       const cmd = renderCommand({
         name: "demo",
         subtype,
-        userName: "alice",
+        username: "noop",
+        password: "noop",
+        expectedPort: 1521,
       });
       expect(cmd.length).toBeGreaterThan(0);
       expect(cmd).toContain("demo.hoop");
     });
   }
 
-  test("postgres + alice -> includes -U alice", () => {
-    expect(
-      renderCommand({ name: "demo", subtype: "postgres", userName: "alice" }),
-    ).toContain("-U alice");
-  });
+  // Each protocol's client takes its credentials differently, and getting
+  // the syntax wrong yields a command that silently prompts or fails. Pin
+  // the exact flag shape per client.
+  const credentialSyntax: Array<{
+    subtype: (typeof subtypes)[number];
+    want: string[];
+  }> = [
+    { subtype: "postgres", want: ["PGPASSWORD=s3cret", "-U hoopuser"] },
+    // mysql glues the password to -p with no space.
+    { subtype: "mysql", want: ["-u hoopuser", "-ps3cret"] },
+    { subtype: "mssql", want: ["-U hoopuser", "-P s3cret"] },
+    { subtype: "mongodb", want: ["mongodb://hoopuser:s3cret@", "directConnection=true"] },
+    { subtype: "oracledb", want: ["hoopuser/s3cret@demo.hoop:1521"] },
+  ];
 
-  test("mysql + bob -> includes -u bob", () => {
-    expect(
-      renderCommand({ name: "demo", subtype: "mysql", userName: "bob" }),
-    ).toContain("-u bob");
+  for (const { subtype, want } of credentialSyntax) {
+    test(`${subtype}: embeds the supplied credentials in the client's own syntax`, () => {
+      const cmd = renderCommand({
+        name: "demo",
+        subtype,
+        username: "hoopuser",
+        password: "s3cret",
+        expectedPort: 1521,
+      });
+      for (const fragment of want) {
+        expect(cmd).toContain(fragment);
+      }
+    });
+  }
+
+  // `tcp` is relayed verbatim: Hoop injects no credentials, so advertising
+  // any would send the user down a dead end.
+  test("tcp: carries no credentials", () => {
+    const cmd = renderCommand({
+      name: "demo",
+      subtype: "tcp",
+      username: "",
+      password: "",
+      expectedPort: 0,
+    });
+    expect(cmd).not.toContain("noop");
   });
+});
+
+describe("renderCommand: daemon without credentials", () => {
+  // A daemon older than the credentials field omits username/password from
+  // /v1/connections. TunnelClient casts the raw JSON without validating, so
+  // the fields are `undefined` at runtime despite the types. Rendering them
+  // produced "PGPASSWORD=undefined psql -U undefined".
+  const legacySubtypes = [
+    "postgres",
+    "mysql",
+    "mssql",
+    "mongodb",
+    "oracledb",
+  ] as const;
+
+  for (const subtype of legacySubtypes) {
+    test(`${subtype}: omitted credentials never render as undefined`, () => {
+      const cmd = renderCommand({
+        name: "demo",
+        subtype,
+        // Exactly what an older daemon yields after the JSON cast.
+        username: undefined as unknown as string,
+        password: undefined as unknown as string,
+        expectedPort: 1521,
+      });
+      expect(cmd).not.toContain("undefined");
+      expect(cmd).toContain("demo.hoop");
+      expect(cmd.length).toBeGreaterThan(0);
+    });
+
+    test(`${subtype}: empty credentials render a usable command`, () => {
+      const cmd = renderCommand({
+        name: "demo",
+        subtype,
+        username: "",
+        password: "",
+        expectedPort: 1521,
+      });
+      // No dangling flag with nothing after it (e.g. "-U " at end of line).
+      expect(cmd).not.toMatch(/(-U|-u|-P)\s*$/);
+      expect(cmd).not.toContain("://:@");
+      expect(cmd).toContain("demo.hoop");
+    });
+  }
 });

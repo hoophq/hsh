@@ -58,6 +58,7 @@ import {
   resolveTokenPath,
 } from "../tunnel/socket-path.ts";
 import type { Connection } from "../tunnel/types.ts";
+import { renderCommand } from "../dashboard/commands.ts";
 import { getPublicServerInfo } from "../api/serverinfo.ts";
 import {
   promptLine,
@@ -763,7 +764,6 @@ function renderConnections(conns: Connection[]): void {
   // Determine column widths once so subtypes/ports line up. We keep
   // this hand-rolled rather than pulling in a table library; the
   // output is small enough that ASCII alignment is enough.
-  const maxName = Math.max(...conns.map((c) => c.name.length));
   const maxSub = Math.max(...conns.map((c) => c.subtype.length));
   const maxHost = Math.max(...conns.map((c) => `${c.name}.hoop`.length));
 
@@ -777,11 +777,33 @@ function renderConnections(conns: Connection[]): void {
         `${chalk.dim("port")} ${portStr.padStart(5)}  ` +
         `${chalk.dim(c.virtual_ip)}`
     );
-    void maxName; // referenced for symmetry with possible future "raw name" column
+    // Same templates the dashboard's "Copy command" button uses.
+    console.log(
+      `  ${" ".repeat(maxHost)}  ${chalk.dim(
+        renderCommand({
+          name: c.name,
+          subtype: c.subtype,
+          username: c.username,
+          password: c.password,
+          expectedPort: c.expected_port,
+        })
+      )}`
+    );
   }
   console.log();
-  console.log(chalk.dim(`  Use: psql -h <name>.hoop  /  mysql -h <name>.hoop -u … -p`));
-  console.log();
+
+  // Only explain credentials when at least one connection actually has
+  // them; a list of `tcp` connections — or an older daemon that omits the
+  // fields entirely — would otherwise advertise a login that does not
+  // exist. Boolean() covers both "" and undefined.
+  if (conns.some((c) => Boolean(c.username) && Boolean(c.password))) {
+    console.log(
+      chalk.dim(
+        "  Credentials above are fixed and local to this tunnel — not your database's."
+      )
+    );
+    console.log();
+  }
 }
 
 function renderUnavailable(err: unknown): void {

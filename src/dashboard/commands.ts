@@ -2,94 +2,118 @@
  * src/dashboard/commands.ts — copy-command generator per connection
  * subtype.
  *
- * The dashboard renders one button per connection: "Copy command".
- * The clipboard content is a ready-to-paste shell line that opens
- * the connection through the tunnel — `psql -h foo.hoop`, etc. This
- * module is the single source of truth for those templates.
+ * Both surfaces render the same thing: the dashboard's "Copy command"
+ * button and `hsh tunnel ls`. This module is the single source of truth
+ * for those templates.
  *
- * Why server-side
+ * Credentials come from the daemon
  *
- * The templates contain "${USER}" / "$USER" placeholders for the
- * shell-level current user. The dashboard runs *for* the user who
- * launched `hsh dashboard`, so the server can ask the OS once at
- * startup, bake it into the template, and ship a fully resolved
- * string to the browser. Doing this in the browser would either need
- * a separate endpoint to expose USER or rely on JavaScript guessing
- * (impossible — the page is sandboxed).
+ * The commands embed the fixed credentials the daemon reports per
+ * connection. They are placeholders, not the database's real secrets: the
+ * agent's protocol proxy accepts them locally and re-authenticates upstream
+ * with the connection's stored credentials. Printing them is therefore safe,
+ * and it is the point — the user should never have to hunt for real
+ * credentials to use the tunnel.
+ *
+ * Earlier revisions guessed the database user from the shell-level current
+ * user, which produced commands that could not connect.
  *
  * Why one module
  *
- * Keeping the templates in TS (not in app.js) gives us:
- *   - TypeScript exhaustive subtype checks so adding a new subtype
- *     to ConnectionSubtype fails the build until a template is
- *     defined.
+ *   - TypeScript exhaustive subtype checks, so adding a new subtype to
+ *     ConnectionSubtype fails the build until a template is defined.
  *   - Trivial unit testing (no DOM, no fetch).
- *   - One place to update when the rendering conventions change
- *     (e.g. we decide to wrap names in quotes).
+ *   - One place to update when rendering conventions change.
  */
 
 import type { ConnectionSubtype } from "../tunnel/types";
 
 /**
- * Inputs to renderCommand. `name` is the bare connection name (we
- * append `.hoop` ourselves); `userName` is the shell-level current
- * user we should default to for tools that require a -u flag.
+ * Inputs to renderCommand. `name` is the bare connection name (we append
+ * `.hoop` ourselves); `username`/`password` are the daemon-reported fixed
+ * credentials, empty for subtypes that authenticate out of band.
  */
 export interface CommandTemplateInput {
   name: string;
   subtype: ConnectionSubtype;
-  userName: string;
+  username: string;
+  password: string;
+  /** Canonical TCP port; 0 when the subtype accepts any port. */
+  expectedPort?: number;
 }
 
 /**
  * Returns the copy-paste command line for the given connection.
- * Always returns a non-empty string — unknown subtypes fall back to
- * a generic `nc` (netcat) snippet rather than throwing, because the
- * dashboard would have no useful way to recover.
+ *
+ * Always returns a non-empty string: unknown subtypes fall back to a generic
+ * `nc` probe rather than throwing, because neither caller has a useful way to
+ * recover from an exception mid-render.
+ *
+ * Host/port are omitted from most templates because the daemon already
+ * enforces the canonical port for the subtype — an explicit port would only
+ * add clutter, and a wrong one is rejected at the SYN.
  */
 export function renderCommand(input: CommandTemplateInput): string {
   const host = `${input.name}.hoop`;
+  // A daemon older than the credentials field omits it entirely, and
+  // TunnelClient.connections() casts the raw JSON without validating, so
+  // these can be undefined at runtime despite the types. Interpolating that
+  // would print `-U undefined`, so fall back to the credential-free command
+  // for the subtype instead.
+  const user = input.username;
+  const pass = input.password;
+  const haveCreds = Boolean(user) && Boolean(pass);
+
   switch (input.subtype) {
     case "postgres":
-      // -h <host>: route through resolved/native DNS. We deliberately
-      // do NOT pass -p because the daemon already enforces the
-      // canonical port; an explicit one would just clutter the
-      // command. Same reasoning for the rest of the templates below.
-      return `psql -h ${host} -U ${input.userName}`;
+      // psql has no password flag; PGPASSWORD is the only way to avoid an
+      // interactive prompt. Without one, psql prompts — still usable.
+      return haveCreds
+        ? `PGPASSWORD=${pass} psql -h ${host} -U ${user}`
+        : `psql -h ${host}`;
 
     case "mysql":
-      // mysql's `-p` without a value prompts for the password (the
-      // safe option). `-u` defaults to the current user.
-      return `mysql -h ${host} -u ${input.userName} -p`;
+      // mysql takes the password glued to -p, with no space. A bare -p
+      // prompts for it.
+      return haveCreds
+        ? `mysql -h ${host} -u ${user} -p${pass}`
+        : `mysql -h ${host} -p`;
 
     case "mssql":
       // sqlcmd is Microsoft's CLI; works on Linux + macOS + Windows.
-      // `-G` enables Active Directory password auth where applicable;
-      // we leave it off because the gateway already provided credentials.
-      return `sqlcmd -S ${host} -U ${input.userName} -P '<password>'`;
+      return haveCreds
+        ? `sqlcmd -S ${host} -U ${user} -P ${pass}`
+        : `sqlcmd -S ${host}`;
 
     case "mongodb":
-      // mongosh is the modern shell; the connection string form
-      // works without a `--host`/`--port` split.
-      return `mongosh "mongodb://${input.userName}@${host}"`;
+      // directConnection=true: the proxy fronts a single endpoint and does
+      // not implement replica-set discovery, so a driver left to run its own
+      // topology scan would try to dial the real cluster members by their
+      // internal hostnames and fail.
+      return haveCreds
+        ? `mongosh "mongodb://${user}:${pass}@${host}/?directConnection=true"`
+        : `mongosh "mongodb://${host}/?directConnection=true"`;
 
     case "oracledb":
-      // sqlplus's connect-string syntax. The `<password>` placeholder
-      // makes the user pause before hitting Enter, which is the
-      // right UX (Oracle passwords aren't usually prompted-for).
-      return `sqlplus ${input.userName}/<password>@${host}`;
+      // sqlplus's connect-string syntax needs the port spelled out.
+      return haveCreds
+        ? `sqlplus ${user}/${pass}@${host}:${input.expectedPort ?? 1521}`
+        : `sqlplus @${host}:${input.expectedPort ?? 1521}`;
+
+    case "httpproxy":
+      // Authorization rides headers the agent injects, and the tunnel has
+      // no certificate for *.hoop, so the scheme is plain http on port 80.
+      return `curl http://${host}/`;
 
     case "tcp":
-      // Raw TCP connections don't have a "canonical port" — the
-      // template uses a placeholder so the user can fill in the
-      // remote port they need.
+      // An opaque user-defined upstream: Hoop cannot know which client the
+      // user needs, and any credentials are their own.
       return `nc -v ${host} <port>`;
 
     default: {
       // Exhaustiveness check. If a new subtype is added to
-      // ConnectionSubtype, TypeScript will flag this default branch
-      // because `_exhaustive` is typed as `never`. The runtime
-      // fallback is a generic TCP probe.
+      // ConnectionSubtype, TypeScript flags this branch because
+      // `_exhaustive` is typed as `never`.
       const _exhaustive: never = input.subtype;
       void _exhaustive;
       return `nc -v ${host} <port>`;
