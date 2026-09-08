@@ -62,7 +62,7 @@ export async function performOAuthLogin(): Promise<void> {
 
   // 4. Wait for the callback token
   const token = await tokenPromise;
-  saveTokenFromJwt(token);
+  await saveTokenFromJwt(token);
   success("Successfully authenticated with Hoop!");
 }
 

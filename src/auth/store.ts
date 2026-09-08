@@ -2,11 +2,29 @@ import { join } from "path";
 import { readFileSync, existsSync, unlinkSync } from "fs";
 import { getHshDir } from "../config/store.ts";
 import { safeWriteJson } from "../util/safe-write.ts";
+import { getKeychain } from "../keychain/auto.ts";
 
+/**
+ * Token metadata persisted to auth.json.
+ *
+ * The actual token string is stored in the OS keychain (macOS Keychain,
+ * libsecret on Linux, or a 0600 fallback file).  auth.json holds only
+ * the non-sensitive metadata that drives expiry checks and the `hsh status`
+ * display — it no longer contains the bearer token itself.
+ *
+ * Migration: if an existing auth.json still has a `token` field (written
+ * by hsh < 0.3), saveToken() will silently migrate it to the keychain and
+ * rewrite auth.json without the field.  getToken() also handles the old
+ * format transparently during migration.
+ */
 export interface AuthData {
-  token: string;
   expiresAt: string;
   email?: string;
+}
+
+/** Shape of the legacy auth.json that included the token inline. */
+interface LegacyAuthData extends AuthData {
+  token?: string;
 }
 
 function getAuthPath(): string {
@@ -20,45 +38,85 @@ export function getAuthData(): AuthData | null {
   }
   try {
     const raw = readFileSync(path, "utf-8");
-    return JSON.parse(raw) as AuthData;
+    const parsed = JSON.parse(raw) as LegacyAuthData;
+    // Strip the legacy token field from the in-memory view.
+    const { token: _ignored, ...rest } = parsed;
+    return rest;
   } catch {
     return null;
   }
 }
 
-export function getToken(): string | null {
-  const auth = getAuthData();
-  if (!auth) return null;
-
-  if (isTokenExpired(auth)) {
+export async function getToken(): Promise<string | null> {
+  // First, check whether we even have metadata (fast path: no auth.json → not logged in).
+  const path = getAuthPath();
+  if (!existsSync(path)) {
+    // But also check the keychain — a migrate-in-progress or partial state
+    // could leave a token without metadata.  Treat as "not authenticated".
     return null;
   }
 
-  return auth.token;
+  let meta: LegacyAuthData;
+  try {
+    const raw = readFileSync(path, "utf-8");
+    meta = JSON.parse(raw) as LegacyAuthData;
+  } catch {
+    return null;
+  }
+
+  // --- Legacy migration path ---
+  // If auth.json still carries the token (written by hsh < 0.3), try to
+  // migrate it to the keychain.  If migration succeeds the token is now in
+  // the keychain and we fall through to the normal read below.  If it fails
+  // (keychain unavailable, daemon down, …) we return the legacy inline token
+  // directly so the user is never locked out — the migration will be retried
+  // on the next invocation.
+  if (meta.token) {
+    const migrated = await migrateFromLegacy(meta);
+    if (!migrated) {
+      // Migration failed — return the legacy token directly to keep the
+      // user authenticated.  Expiry check still applies.
+      if (isTokenExpired(meta)) return null;
+      return meta.token;
+    }
+    // Migration succeeded; fall through to the keychain read below.
+  }
+
+  if (isTokenExpired(meta)) {
+    return null;
+  }
+
+  return getKeychain().get();
 }
 
-export function saveToken(token: string, expiresAt: string, email?: string): void {
-  const data: AuthData = { token, expiresAt, email };
-  // Atomic write — concurrent shells racing on auth refresh must never see
-  // a torn JSON file (which would force a spurious OAuth round-trip).
+export async function saveToken(token: string, expiresAt: string, email?: string): Promise<void> {
+  // Store the token in the OS keychain.
+  await getKeychain().set(token);
+
+  // Persist only the non-sensitive metadata to auth.json.
+  const data: AuthData = { expiresAt, ...(email ? { email } : {}) };
   safeWriteJson(getAuthPath(), data, { mode: 0o600 });
 }
 
-export function clearToken(): void {
+export async function clearToken(): Promise<void> {
+  // Remove from keychain.
+  await getKeychain().delete();
+
+  // Remove metadata file.
   const path = getAuthPath();
   if (existsSync(path)) {
-    unlinkSync(path);
+    try { unlinkSync(path); } catch {}
   }
 }
 
-export function isAuthenticated(): boolean {
-  return getToken() !== null;
+export async function isAuthenticated(): Promise<boolean> {
+  return (await getToken()) !== null;
 }
 
 function isTokenExpired(auth: AuthData): boolean {
   const expiresAt = new Date(auth.expiresAt);
   const now = new Date();
-  // Consider expired 60s before actual expiry for safety margin
+  // Consider expired 60s before actual expiry for safety margin.
   return now.getTime() >= expiresAt.getTime() - 60_000;
 }
 
@@ -73,7 +131,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
-export function saveTokenFromJwt(token: string): void {
+export async function saveTokenFromJwt(token: string): Promise<void> {
   const payload = decodeJwtPayload(token);
   let expiresAt: string;
   let email: string | undefined;
@@ -81,7 +139,7 @@ export function saveTokenFromJwt(token: string): void {
   if (payload?.exp && typeof payload.exp === "number") {
     expiresAt = new Date(payload.exp * 1000).toISOString();
   } else {
-    // Default to 24h if no exp claim
+    // Default to 24h if no exp claim.
     expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   }
 
@@ -89,5 +147,28 @@ export function saveTokenFromJwt(token: string): void {
     email = payload.email;
   }
 
-  saveToken(token, expiresAt, email);
+  await saveToken(token, expiresAt, email);
+}
+
+/**
+ * Migrate a legacy auth.json (which carries the token inline) to the keychain.
+ * Rewrites auth.json without the token field on success.
+ *
+ * Returns true if migration succeeded, false if it failed (caller must fall
+ * back to the legacy inline token so the user is never locked out).
+ *
+ * Called automatically by getToken() when it detects the old format.
+ */
+async function migrateFromLegacy(legacy: LegacyAuthData): Promise<boolean> {
+  if (!legacy.token) return true;
+  try {
+    await getKeychain().set(legacy.token);
+    const { token: _dropped, ...meta } = legacy;
+    safeWriteJson(getAuthPath(), meta, { mode: 0o600 });
+    return true;
+  } catch {
+    // Keychain unavailable or write failed — leave auth.json intact.
+    // Caller will use the legacy inline token for this session.
+    return false;
+  }
 }

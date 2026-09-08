@@ -12,7 +12,7 @@ export const statusCommand = new Command("status")
   .action(async () => {
     const apiUrl = getApiUrl();
     const auth = getAuthData();
-    const authenticated = isAuthenticated();
+    const authenticated = await isAuthenticated();
     const plugins = listPlugins();
 
     console.log(chalk.bold("\nHoop Shell Plugins (hsh)\n"));

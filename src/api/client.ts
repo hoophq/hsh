@@ -158,14 +158,14 @@ export async function fetchWithTimeout(
 /**
  * Hook called when the gateway returns a refreshed access token via
  * the X-New-Access-Token response header. Default behavior is to
- * persist it to auth.json (atomic write). Tests inject a stub.
+ * persist it to the OS keychain. Tests inject a stub.
  */
-export type TokenRefreshHandler = (newToken: string) => void;
+export type TokenRefreshHandler = (newToken: string) => Promise<void>;
 
-const defaultTokenRefreshHandler: TokenRefreshHandler = (newToken) => {
+const defaultTokenRefreshHandler: TokenRefreshHandler = async (newToken) => {
   // saveTokenFromJwt decodes the JWT to extract the new exp/email and
-  // writes via the same atomic-write path used by the OAuth login flow.
-  saveTokenFromJwt(newToken);
+  // persists the token to the OS keychain + writes metadata to auth.json.
+  await saveTokenFromJwt(newToken);
 };
 
 export class HoopApiClient {
@@ -222,14 +222,12 @@ export class HoopApiClient {
 
     debug("auth", "X-New-Access-Token received; rotating in-memory + persisting");
     this.token = trimmed;
-    try {
-      this.onTokenRefreshed(trimmed);
-    } catch (err) {
-      // Persisting failed (disk full, permission, …). The in-memory
-      // rotation still succeeded so this process keeps working;
-      // log and move on.
+    // Fire-and-forget the async persist — the in-memory rotation is already
+    // done so this request and the next one are unaffected if the keychain
+    // write is slow. Errors are caught inside the handler itself.
+    this.onTokenRefreshed(trimmed).catch((err) => {
       debug("auth", `failed to persist rotated token: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    });
   }
 
   private async request<T>(path: string, options: RequestOptions = {}): Promise<T> {

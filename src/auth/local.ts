@@ -93,7 +93,7 @@ export async function performLocalAuthLogin(apiUrl: string): Promise<void> {
     process.exit(1);
   }
 
-  saveTokenFromJwt(token.trim());
+  await saveTokenFromJwt(token.trim());
   // Drain the body so the connection can be reused / closed cleanly.
   try {
     await response.json();

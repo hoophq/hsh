@@ -15,7 +15,7 @@ export const logoutCommand = new Command("logout")
   )
   .action(async (opts: { tunnel: boolean }) => {
     // Step 1: clear the CLI's own credentials + cached sessions.
-    logout();
+    await logout();
     success("Logged out successfully.");
 
     // Step 2: best-effort daemon logout (clears its token + tears the
