@@ -168,6 +168,9 @@ const defaultTokenRefreshHandler: TokenRefreshHandler = (newToken) => {
   saveTokenFromJwt(newToken);
 };
 
+/** managed_by of a connection that mirrors a sidecar listener. */
+export const MANAGED_BY_SIDECAR = "sidecar";
+
 export class HoopApiClient {
   private apiUrl: string;
   /**
@@ -273,8 +276,14 @@ export class HoopApiClient {
     return response.json() as Promise<T>;
   }
 
+  /**
+   * Lists connections the user can reach through hsh. Connections that
+   * mirror a sidecar listener are left out: the client connects to the
+   * listener itself, so hsh cannot route to them.
+   */
   async listConnections(): Promise<Connection[]> {
-    return this.request<Connection[]>("/api/connections");
+    const connections = await this.request<Connection[]>("/api/connections");
+    return connections.filter((c) => c.managed_by !== MANAGED_BY_SIDECAR);
   }
 
   async getConnection(name: string): Promise<Connection> {
