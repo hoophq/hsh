@@ -224,3 +224,24 @@ describe("formatApiError", () => {
     expect(formatApiError({ status: 500 })).toBe("[object Object]");
   });
 });
+
+describe("listConnections", () => {
+  test("leaves out connections that mirror a sidecar listener", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        Response.json([
+          { name: "pay-appdb", type: "database", subtype: "postgres", managed_by: "sidecar" },
+          { name: "pg", type: "database", subtype: "postgres" },
+          { name: "aws-pg", type: "database", subtype: "postgres", managed_by: "hoop" },
+        ]),
+    });
+    try {
+      const client = new HoopApiClient(`http://127.0.0.1:${server.port}`, "token", () => {});
+      const names = (await client.listConnections()).map((c) => c.name);
+      expect(names).toEqual(["pg", "aws-pg"]);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
